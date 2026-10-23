@@ -705,8 +705,6 @@ fn box_plane<T: Copy + Into<u32> + TryFrom<u32> + Send + Sync + Default>(src: &[
     out
 }
 
-/// The `r` part of a `w`×`h` plane of `n`-element pixels (`r` lies inside the plane). A plane too
-/// short for its size gives a blank result, as in [`rotate_plane`].
 /// IEEE half → f32: the exact value of every bit pattern (subnormals, infinities and NaNs
 /// included), with a branch-light path for normal numbers and zeros.
 #[inline(always)]
@@ -752,9 +750,14 @@ pub fn f32_to_half(v: f32) -> u16 {
         if e < -10 {
             return sign;
         }
-        let m = (mant | 0x80_0000) >> (1 - e);
-        let round = (m >> 12) & 1;
-        return sign | (((m >> 13) + round) as u16);
+        // a subnormal: the mantissa with its implicit bit at the half's scale, ties to even
+        let full = mant | 0x80_0000;
+        let shift = (14 - e) as u32; // 14..=24
+        let m = full >> shift;
+        let rest = full & ((1 << shift) - 1);
+        let tie = 1 << (shift - 1);
+        let up = rest > tie || (rest == tie && m & 1 == 1);
+        return sign | (m + u32::from(up)) as u16;
     }
     let m = mant >> 13;
     let round_bits = mant & 0x1fff;
@@ -765,6 +768,8 @@ pub fn f32_to_half(v: f32) -> u16 {
     h as u16
 }
 
+/// The `r` part of a `w`×`h` plane of `n`-element pixels (`r` lies inside the plane). A plane too
+/// short for its size gives a blank result, as in [`rotate_plane`].
 fn crop_plane<T: Copy + Default>(src: &[T], w: usize, h: usize, n: usize, r: Region) -> Vec<T> {
     let mut out = vec![T::default(); r.w * r.h * n];
     if src.len() < w * h * n || r.x + r.w > w || r.y + r.h > h {
@@ -1076,7 +1081,15 @@ mod tests {
             };
             let got = half_to_f32(bits);
             assert!(got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()), "half {bits:04x}: {got} vs {want}");
+            if !got.is_nan() {
+                assert_eq!(f32_to_half(got), bits, "{got} back to a half");
+            }
         }
+        // halfway between two halves rounds to the even one, subnormals included
+        let tiny = 2.0f32.powi(-25); // half the smallest subnormal
+        assert_eq!([f32_to_half(tiny), f32_to_half(3.0 * tiny), f32_to_half(5.0 * tiny)], [0, 2, 2]);
+        assert_eq!(f32_to_half(tiny * 1.0001), 1, "above the tie rounds up");
+        assert_eq!([f32_to_half(1.0 + 2.0f32.powi(-11)), f32_to_half(1.0 + 3.0 * 2.0f32.powi(-11))], [0x3c00, 0x3c02]);
         // an f16 frame converts, crops and rotates exactly like the f32 frame of its values
         let frames = sample_frames_sized(41, 19);
         let f16 = frames.iter().find(|(n, _)| *n == "rgba f16").map(|(_, f)| f.clone()).unwrap();

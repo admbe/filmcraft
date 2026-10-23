@@ -1060,6 +1060,11 @@ impl FilmcraftApp {
         Ok(seconds)
     }
 
+    /// Whether the Program or the Source monitor is playing.
+    pub fn any_playing(&self) -> bool {
+        self.playback.playing || self.source_playback.clock.playing
+    }
+
     pub fn stop(&mut self) {
         self.playback.playing = false;
         self.playback.stop_at = None;
@@ -1319,7 +1324,7 @@ impl FilmcraftApp {
         }
         let scale = width as f32 / src_w.max(1) as f32;
         let project = self.session.project.clone();
-        self.frames.request(key, rate.tick_of(frame), scale, &project, 50);
+        self.frames.request_while(key, rate.tick_of(frame), scale, &project, 50, self.any_playing());
         let shown = self.texture_existing(&name);
         if shown.is_some() {
             self.thumb_touched(ctx, &name);

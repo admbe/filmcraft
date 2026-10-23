@@ -401,6 +401,12 @@ fn set_own(m: &mut MediaClip, camera_raw: &RawDevelop, own: Option<RawDevelop>) 
     let before = RawDevelop::effective(camera_raw, m.interpret.develop.as_ref());
     m.interpret.develop = own;
     let after = RawDevelop::effective(camera_raw, m.interpret.develop.as_ref());
+    sync_derived(m, &before, &after);
+}
+
+/// Bring what depends on a clip's development in line after it changed from `before` to `after`
+/// (its own settings, or the project's for a clip that follows them).
+fn sync_derived(m: &mut MediaClip, before: &RawDevelop, after: &RawDevelop) {
     let output_changed = (before.color_space, before.gamma) != (after.color_space, after.gamma);
     if let Some(cs) = m.interpret.color_space
         && RawDevelop::INTERPRETATIONS.contains(&cs)
@@ -575,7 +581,18 @@ pub(crate) fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
     d.validate().map_err(|e| bad(CMD, e))?;
     if d != s.project.settings.camera_raw {
         s.edit("Project Settings", |pr, _| {
-            pr.settings.camera_raw = d;
+            let old = std::mem::replace(&mut pr.settings.camera_raw, d);
+            // Clips that follow the project (Decode Using ▸ Project) take its new output with it.
+            for it in pr.items.values_mut() {
+                if let ItemKind::Media(m) = &mut it.kind
+                    && m.is_camera_raw()
+                {
+                    let (before, after) = (RawDevelop::effective(&old, m.interpret.develop.as_ref()), RawDevelop::effective(&d, m.interpret.develop.as_ref()));
+                    if before != after {
+                        sync_derived(m, &before, &after);
+                    }
+                }
+            }
             Ok(())
         })?;
     }

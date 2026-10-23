@@ -813,7 +813,7 @@ struct CpuWork {
             if (t.joinable()) t.join();
         }
     }
-    // Threads for CPU work: three by default (the SDK's own decoder threads do the heavy part).
+    // Threads for CPU work: four by default (the SDK's own decoder threads do the heavy part).
     static size_t thread_count() { return env_number("FILMCRAFT_R3D_CPU_THREADS", 1, 16, 4); }
     void enqueue(Job job) {
         std::lock_guard<std::mutex> lock(mutex);

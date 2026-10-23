@@ -294,6 +294,27 @@ fn project_settings_are_the_default_of_clips_that_decode_using_project() {
     assert_eq!(s.project.settings.camera_raw, RawDevelop::STANDARD);
 }
 
+/// A project change of output reaches the clips that follow it as it does a clip's own: ST 2084
+/// gives them HDR metadata with the project's peak (what tone mapping reads), and leaving it
+/// takes the metadata away. A clip with settings of its own keeps what it had.
+#[test]
+fn project_settings_refresh_the_hdr_metadata_of_clips_that_follow_them() {
+    let mut s = demo();
+    let a = add_r3d(&mut s, "A.R3D", "/footage/A.R3D");
+    let b = add_r3d(&mut s, "B.R3D", "/footage/B.R3D");
+    s.execute("clip.sourceSettings", json!({"items": [b.0], "gamma": "srgb"})).unwrap();
+    let peak = |s: &Session, id: ItemId| media(s, id).info.video.unwrap().hdr.and_then(|h| h.mastering_max_nits);
+    s.execute("file.projectSettings.cameraRaw", json!({"gamma": "st2084", "hdrPeakNits": 1000})).unwrap();
+    assert_eq!((peak(&s, a), peak(&s, b)), (Some(1000.0), None));
+    assert_eq!(s.execute("media.colorInfo", json!({"item": a.0})).unwrap()["effective"], "rec2100-pq");
+    s.execute("file.projectSettings.cameraRaw", json!({"hdrPeakNits": 4000})).unwrap();
+    assert_eq!(peak(&s, a), Some(4000.0));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(peak(&s, a), Some(1000.0), "undo puts the metadata back with the settings");
+    s.execute("file.projectSettings.cameraRaw", json!({"standard": true})).unwrap();
+    assert_eq!(peak(&s, a), None);
+}
+
 /// A project saved before Camera RAW settings existed opens with scene-linear Rec. 709 as its
 /// project settings (what its clips developed with), and a clip's old `output` still reads.
 #[test]

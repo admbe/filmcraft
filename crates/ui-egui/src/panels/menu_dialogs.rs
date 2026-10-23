@@ -1343,8 +1343,11 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
             if p["ingest"] != d.info["ingest"] {
                 s.execute("project.ingestSettings", p["ingest"].clone()).map_err(|e| e.to_string())?;
             }
-            if p["cameraRaw"] != d.info["cameraRawOpened"] {
-                s.execute("file.projectSettings.cameraRaw", panel_params(&d.info["cameraRaw"]["settings"], &p["cameraRaw"])).map_err(|e| e.to_string())?;
+            // the panel's state also holds what it shows (`shownPair`): compare the parameters
+            let settings = &d.info["cameraRaw"]["settings"];
+            let wanted = panel_params(settings, &p["cameraRaw"]);
+            if wanted != panel_params(settings, &d.info["cameraRawOpened"]) {
+                s.execute("file.projectSettings.cameraRaw", wanted).map_err(|e| e.to_string())?;
             }
             Ok(None)
         }

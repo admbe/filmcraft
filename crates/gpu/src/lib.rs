@@ -109,74 +109,24 @@ fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// f32 → IEEE half (round to nearest even), no dependency needed.
+/// f32 → IEEE half (round to nearest even): [`filmcraft_frame::f32_to_half`].
+#[inline]
 pub fn f32_to_f16(v: f32) -> u16 {
-    let x = v.to_bits();
-    let sign = ((x >> 16) & 0x8000) as u16;
-    let exp = ((x >> 23) & 0xff) as i32;
-    let mant = x & 0x7f_ffff;
-    if exp == 0xff {
-        return sign | 0x7c00 | if mant != 0 { 0x200 } else { 0 };
-    }
-    let e = exp - 127 + 15;
-    if e >= 0x1f {
-        return sign | 0x7c00;
-    }
-    if e <= 0 {
-        if e < -10 {
-            return sign;
-        }
-        let m = (mant | 0x80_0000) >> (1 - e);
-        let round = (m >> 12) & 1;
-        return sign | (((m >> 13) + round) as u16);
-    }
-    let m = mant >> 13;
-    let round_bits = mant & 0x1fff;
-    let mut h = (sign as u32) | ((e as u32) << 10) | m;
-    if round_bits > 0x1000 || (round_bits == 0x1000 && (m & 1) == 1) {
-        h += 1;
-    }
-    h as u16
+    filmcraft_frame::f32_to_half(v)
 }
 
-/// IEEE half → f32 (the inverse of [`f32_to_f16`]), for reading `Rgba16Float` textures back.
+/// IEEE half → f32 (the inverse of [`f32_to_f16`]), for reading `Rgba16Float` textures back:
+/// [`filmcraft_frame::half_to_f32`].
+#[inline]
 pub fn f16_to_f32(h: u16) -> f32 {
-    let sign = ((h & 0x8000) as u32) << 16;
-    let exp = ((h >> 10) & 0x1f) as u32;
-    let mant = (h & 0x03ff) as u32;
-    let bits = match exp {
-        0 => {
-            if mant == 0 {
-                sign
-            } else {
-                // Half subnormal: value = mant × 2⁻²⁴ = (1 + frac) × 2^(b−24) with b the mantissa's
-                // highest set bit — renormalise into an f32.
-                let b = 31 - mant.leading_zeros();
-                let frac = (mant ^ (1 << b)) << (23 - b);
-                sign | ((103 + b) << 23) | frac
-            }
-        }
-        0x1f => sign | 0x7f80_0000 | (mant << 13),
-        _ => sign | ((exp + 112) << 23) | (mant << 13),
-    };
-    f32::from_bits(bits)
+    filmcraft_frame::half_to_f32(h)
 }
 
-/// [`f16_to_f32`] with a branch-light path for normal numbers and zeros (the bulk of read-back
-/// data); subnormals, infinities and NaNs take the general path. Same result for every input.
+/// [`f16_to_f32`]; [`filmcraft_frame::half_to_f32`] already takes a branch-light path for normal
+/// numbers and zeros (the bulk of read-back data).
 #[inline(always)]
 pub fn f16_to_f32_fast(h: u16) -> f32 {
-    let u = u32::from(h);
-    let sign = (u & 0x8000) << 16;
-    let abs = u & 0x7fff;
-    if (0x0400..0x7c00).contains(&abs) {
-        // rebias the exponent (127 - 15 = 112) and widen the mantissa
-        f32::from_bits(sign | ((abs + (112 << 10)) << 13))
-    } else if abs == 0 {
-        f32::from_bits(sign)
-    } else {
-        f16_to_f32(h)
-    }
+    filmcraft_frame::half_to_f32(h)
 }
 
 /// Half-float texel data for one frame (one byte vector per plane), converted off the UI thread.

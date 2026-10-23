@@ -93,7 +93,7 @@ struct Job {
     scale: f32,
     project: Arc<Project>,
     prio: u32,
-    /// Asked for with playback stopped ([`FrameServer::request`]): one frame someone waits for
+    /// Asked for with playback stopped ([`FrameServer::request_while`]): one frame someone waits for
     /// (`filmcraft_media::cancel::with_still`).
     still: bool,
 }
@@ -569,14 +569,35 @@ fn lookahead(capacity: usize, depth: i64) -> i64 {
 /// Playback prefetches frames ahead of the playhead, and nothing looks at one until it is due:
 /// under plain LRU they were the oldest entries, and a 6K half-resolution frame (then 123 MB as
 /// a plan, eight to the budget) decoded 26 frames ahead was evicted before the playhead reached
-/// it, while the frames behind the playhead stayed.
-fn eviction_key(used: u64, inserted: u64) -> (bool, u64) {
-    (used == inserted, used)
+/// it, while the frames behind the playhead stayed. A never-used entry keeps that place only
+/// while it is fresh (inserted within [`PlanCache::FRESH`] ticks of the cache's `clock`) and
+/// playback has not stopped since ([`PlanCache::stale_prefetch`]): a frame playback skipped or
+/// prefetched before it stopped, or one of an old revision, would otherwise stay until nothing
+/// else is left, and a scrub would evict the frames it had just shown instead.
+fn eviction_key(used: u64, inserted: u64, clock: u64) -> (bool, u64) {
+    (used == inserted && clock.saturating_sub(inserted) < PlanCache::FRESH, used)
+}
+
+/// When a plan last looked up at `used` counts as inserted once playback stopped (see
+/// [`PlanCache::stale_prefetch`]): one nobody looked up no longer counts as fresh.
+fn stopped(used: u64, inserted: u64) -> u64 {
+    if used == inserted { inserted.saturating_sub(PlanCache::FRESH) } else { inserted }
 }
 
 impl PlanCache {
     const MAX: usize = 96;
     const BUDGET: usize = 1 << 30;
+    /// Lookups and inserts within which a prefetched plan is still due (playback refreshes look
+    /// up a few plans a frame; it prefetches at most [`prefetch_depth`] frames ahead).
+    const FRESH: u64 = 1024;
+
+    /// Playback stopped: the plans it prefetched and nobody looked up count as used when they
+    /// were inserted, so they go before the frames a scrub shows next.
+    fn stale_prefetch(&mut self) {
+        for (_, used, inserted, _) in self.map.values_mut() {
+            *inserted = stopped(*used, *inserted);
+        }
+    }
 
     fn get(&mut self, k: &FrameKey) -> Option<Arc<GpuPlan>> {
         self.clock += 1;
@@ -601,7 +622,8 @@ impl PlanCache {
             self.bytes -= old;
         }
         if self.map.len() > Self::MAX || self.bytes > Self::BUDGET {
-            let mut v: Vec<((bool, u64), FrameKey, usize)> = self.map.iter().map(|(k, v)| (eviction_key(v.1, v.2), *k, v.3)).collect();
+            let clock = self.clock;
+            let mut v: Vec<((bool, u64), FrameKey, usize)> = self.map.iter().map(|(k, v)| (eviction_key(v.1, v.2, clock), *k, v.3)).collect();
             v.sort_unstable_by_key(|x| x.0);
             for (_, k, b) in v {
                 if self.map.len() <= Self::MAX && self.bytes <= Self::BUDGET {
@@ -968,8 +990,15 @@ impl FrameServer {
     /// [`SCRUB_KEEP_S`] before it as not wanted: a decoder seeking from a keyframe skips their
     /// non-reference pictures, while nearby frames stay decoded (and cached) for scrubbing back.
     pub fn request(&self, key: FrameKey, time: Tick, scale: f32, project: &Arc<Project>, prio: u32) {
+        self.request_while(key, time, scale, project, prio, false);
+    }
+
+    /// [`Self::request`] from a view that also draws while playback runs (scopes, the Reference
+    /// monitor, thumbnails): with `playing` its frame is not a still someone waits for, so a
+    /// source does not move it to its still-frame path (`filmcraft_media::cancel::with_still`).
+    pub fn request_while(&self, key: FrameKey, time: Tick, scale: f32, project: &Arc<Project>, prio: u32, playing: bool) {
         let late = (prio == 0).then(|| Tick::from_seconds_f64(SCRUB_KEEP_S));
-        self.request_job(key, time, scale, project, prio, false, late, true);
+        self.request_job(key, time, scale, project, prio, false, late, !playing);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1218,6 +1247,7 @@ impl FrameServer {
     /// they would keep the workers busy, e.g. rendering effects for frames nobody will see).
     pub fn stop_prefetch(&self) {
         self.shared.queue.lock().unwrap_or_else(|e| e.into_inner()).retain(|j| !j.prefetch);
+        self.shared.plans.lock().unwrap_or_else(|e| e.into_inner()).stale_prefetch();
         for (_, c, prefetch) in self.shared.in_flight.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             if *prefetch {
                 c.store(true, Ordering::Relaxed);
@@ -1584,7 +1614,7 @@ fn render_job(job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Services>, pr
 mod tests {
     use super::{
         PlaybackMeter, SPARSEST, SourceRate, Target, Throughput, background_work, choose_pattern, eviction_key, in_pattern, lookahead, next_sparser,
-        planned_frames, playback_plan, throughput_plan,
+        planned_frames, playback_plan, stopped, throughput_plan,
     };
     use filmcraft_media::FrameDelivery;
     use filmcraft_project::ItemId;
@@ -1864,9 +1894,29 @@ mod tests {
         // (name, last looked up, inserted): the playhead's frame is looked up every refresh,
         // the frames behind it were, the frames ahead never
         let mut entries = [("ahead-near", 5, 5), ("ahead-far", 8, 8), ("shown-now", 9, 4), ("shown-before", 7, 3), ("shown-long-ago", 2, 1)];
-        entries.sort_by_key(|e| eviction_key(e.1, e.2));
+        entries.sort_by_key(|e| eviction_key(e.1, e.2, 10));
         let order: Vec<&str> = entries.iter().map(|e| e.0).collect();
         assert_eq!(order, ["shown-long-ago", "shown-before", "shown-now", "ahead-near", "ahead-far"]);
+        // long after: a frame nobody looked up (skipped, or of an old revision) is just old
+        let mut entries = [("never-looked-up", 5, 5), ("shown-now", 3000, 9)];
+        entries.sort_by_key(|e| eviction_key(e.1, e.2, 3000));
+        assert_eq!(entries.map(|e| e.0), ["never-looked-up", "shown-now"]);
+    }
+
+    /// Playback prefetched frames ahead and stopped; a scrub then shows new frames. Over budget,
+    /// the stale prefetched plans go first, not the frames the scrub just showed.
+    #[test]
+    fn prefetched_plans_go_first_once_playback_stopped() {
+        // (last looked up, inserted) at clock 100: two prefetched, two shown by the scrub
+        let mut v = [(95, 95), (98, 98), (99, 96), (100, 97)];
+        for e in &mut v {
+            e.1 = stopped(e.0, e.1);
+        }
+        let mut order: Vec<usize> = (0..v.len()).collect();
+        order.sort_by_key(|&i| eviction_key(v[i].0, v[i].1, 100));
+        assert_eq!(order, [0, 1, 2, 3], "the prefetched (0, 1) before the shown (2, 3)");
+        assert_eq!(stopped(99, 96), 96, "a plan looked up keeps its place");
+        assert_eq!(stopped(3, 3), 0, "no underflow");
     }
 
     #[test]

@@ -245,7 +245,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             // the reference frame (CPU path)
             let rf = rate.frame_at(Tick(mv.compare_ref.unwrap_or(time.0)));
             let rkey = FrameKey { target: cpu_target, frame: rf, size: size_key, revision: rev, draft: false };
-            app.frames.request(rkey, rate.tick_of(rf), scale, &project, 1);
+            app.frames.request_while(rkey, rate.tick_of(rf), scale, &project, 1, app.any_playing());
             let rpic = fit(ra, display_w, frame_size.1 as f32);
             ui.painter().rect_filled(rpic, 0.0, t.monitor_bg);
             if let (Some(tex), _) = cpu_texture(app, &ctx, &format!("monitor-{prefix}-ref"), rkey, &[], DisplayMode::Composite) {

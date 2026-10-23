@@ -117,7 +117,7 @@ clips:
   running SDK) the first time that clip is asked for a frame. A cut in a timeline of a hundred clips
   is a clip already open, not a process start.
 - The **CPU helper** serves audio, thumbnails (Project panel, Media Browser, timeline), the metadata
-  probe at import, and frames while the GPU helper is unavailable. It runs three threads fed from
+  probe at import, and frames while the GPU helper is unavailable. It runs four threads fed from
   two queues, audio first, so a thumbnail never makes the sound wait.
 - **Still frames** (playback stopped: a scrub, a click on the ruler, a paused monitor) at a quarter
   of the size or smaller are decoded by the CPU helper, which answers an eighth in ~35 ms where one
@@ -312,7 +312,7 @@ before use, so no Rust invariant depends on the helper keeping to the protocol.
 **Knobs** for measurement and small GPUs, not user settings: `FILMCRAFT_R3D_SLOTS` (1–8, default 5),
 `FILMCRAFT_R3D_GPU_FRAMES` (the SDK's GPU streams, 1–8, default 3), `FILMCRAFT_R3D_HOST_POOL_MB` and
 `FILMCRAFT_R3D_GPU_POOL_MB` (the SDK's pool limits, default 8192 and 6144; 4096 for a GPU that others
-already fill), `FILMCRAFT_R3D_CPU_THREADS` (1–16, default 3) and `FILMCRAFT_R3D_STILL_CPU_DIVISOR`
+already fill), `FILMCRAFT_R3D_CPU_THREADS` (1–16, default 4) and `FILMCRAFT_R3D_STILL_CPU_DIVISOR`
 (0, 1, 2, 4, 8 or 16, default 4: the smallest still frame the CPU helper decodes; 0 keeps them on the
 GPU). The SDK's image-thread count stays at its default: one image thread serialises the whole SDK
 pipeline however many frames are submitted.
