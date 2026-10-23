@@ -346,7 +346,9 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   on time and spaces them evenly (`playback_plan`). A source whose frames decode independently
   and slower than the sequence rate (camera RAW through a pipelined decoder; it says so with
   `MediaSource::frame_delivery`, and reports its own throughput when it measures one) gets a plan
-  of its own (`throughput_plan`): every n-th frame, anchored so the set does not shift with the
+  of its own (`throughput_plan`): m of every n frames (three of four, every third…), what the
+  source delivers against the sequence rate and what the workers sustain (each holds a job for
+  the source's latency), chosen with hysteresis and anchored so the set does not shift with the
   playhead, started its latency plus slack ahead, and a running job it has in hand is left to
   finish a few frames behind the playhead (`LATE_GRACE`) and shown late rather than cancelled.
   When decoding is what falls behind, each job tells its sources which frames are already late (`filmcraft_media::cancel::with_catch_up`: the

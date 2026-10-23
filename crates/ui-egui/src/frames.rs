@@ -124,8 +124,12 @@ struct Shared {
 pub struct SourceRate {
     /// Frames per second (smoothed); `None` until a source reported one or enough jobs completed.
     pub rate: Option<f64>,
-    /// Seconds from a job's start to its frame (smoothed), with the wait for a decoder slot.
+    /// Seconds from a job's start to its frame (smoothed, rising fast), with the wait for a
+    /// decoder slot: what the lead is sized by.
     pub latency: f64,
+    /// The same, smoothed slowly both ways: what the workers' throughput is judged by, so one
+    /// slow job (a 60 ms one among 40 ms ones at 120 fps) does not read as capacity lost.
+    pub latency_slow: f64,
 }
 
 #[derive(Default)]
@@ -139,12 +143,155 @@ struct Throughput {
     /// When jobs on such sources finished (not cancelled), for the rate when the source itself
     /// reports none.
     completions: VecDeque<Instant>,
+    /// The pattern playback last planned with (see [`choose_pattern`]).
+    pattern: Option<(i64, i64)>,
+    /// The refresh window being counted (see [`Self::settle`]): since when, refreshes in it,
+    /// how many found the picture late (more than a pattern step behind), how many on time.
+    window: Option<(Instant, u32, u32, u32)>,
+    /// Windows in a row with the picture on time.
+    on_time_windows: u32,
+    /// When the pattern was last made sparser because the picture ran late, and how long after
+    /// that a denser one may be tried (doubles while trying fails, see [`Self::settle`]).
+    backed_off_at: Option<Instant>,
+    cooldown: Duration,
+    /// A denser pattern was stepped up to at this time, from this one: a step that runs late
+    /// within [`Self::HOLD`] goes back to it and doubles the cooldown.
+    stepped_up: Option<(Instant, (i64, i64))>,
+    /// The source measures its own rate, and when a job last brought a fresh reading of it
+    /// (see [`filmcraft_media::FrameDelivery::fresh`]).
+    reports_rate: bool,
+    fresh_at: Option<Instant>,
+    /// When the playback clock started (the preroll ended): the picture is not judged for
+    /// [`Self::STARTUP`] after that, while the first planned frames are still on their way.
+    clock_started: Option<Instant>,
 }
 
 impl Throughput {
     /// Playback jobs without a throughput-bound source after which the model is dropped.
     const MISSES: u32 = 12;
     const COMPLETIONS: usize = 32;
+    /// Refreshes are counted in windows this long; a window with two in five refreshes late
+    /// makes the pattern sparser, whatever the capacity reads.
+    const WINDOW: Duration = Duration::from_millis(500);
+    /// Windows in a row with the picture on time that allow a denser pattern, once the
+    /// cooldown has passed.
+    const SLACK_WINDOWS: u32 = 2;
+    /// The cooldown after backing off: this, doubled for every step up that failed within
+    /// [`Self::HOLD`], up to a minute; back to this once a step up held that long.
+    const COOLDOWN: Duration = Duration::from_secs(4);
+    const MAX_COOLDOWN: Duration = Duration::from_secs(60);
+    const HOLD: Duration = Duration::from_secs(3);
+    /// Lateness is not judged this long after backing off: the frames the denser pattern left
+    /// queued are dropped as the playhead passes them, the new pattern's frames are started a
+    /// lead ahead and take the latency to arrive, and the picture catches up meanwhile; a
+    /// back-off every window would otherwise cascade to every n-th frame.
+    const RECOVER: Duration = Duration::from_secs(2);
+    /// A reading older than this is stale: playback asks for a few more frames at once to
+    /// measure the source again (see [`FrameServer::schedule_playback`]).
+    const FRESH_FOR: Duration = Duration::from_secs(2);
+    /// The picture is not judged this long after the clock starts: the preroll frames are
+    /// ready, the planned run beyond them is still decoding, and a window judged on that
+    /// backed a 6K 59.94p clip off from every third frame to every fifth at every start.
+    const STARTUP: Duration = Duration::from_secs(2);
+
+    /// The playback clock is running (`false` while prerolling); `Some` once the picture may be
+    /// judged, with the time now.
+    fn judging(&mut self, running: bool, now: Instant) -> bool {
+        if !running {
+            self.clock_started = None;
+            return false;
+        }
+        let started = *self.clock_started.get_or_insert(now);
+        now.saturating_duration_since(started) >= Self::STARTUP
+    }
+
+    /// The pattern to use, given what the capacity reading chose (`chosen`, with the rate's
+    /// hysteresis) and how the picture is doing: `lag` is how many frames the newest ready
+    /// picture of the pattern in use is behind the frame due (`None` while the clock has not
+    /// started).
+    ///
+    /// The reading is a throughput measured at saturation, within a few per cent of the
+    /// sequence rate for a 6K 24p clip on a 22–27 fps pipeline, so the picture itself decides
+    /// at the margin, counted over [`Self::WINDOW`]s of refreshes (a pipeline a fifth short of
+    /// a pattern still lands most of its frames, so the lag flickers between zero and several
+    /// frames rather than staying high): a window with two in five refreshes late → sparser
+    /// now, back to the pattern before a step up that just failed; the reading's denser choice
+    /// only after [`Self::SLACK_WINDOWS`] on time and the cooldown since backing off; while a
+    /// step up is held for [`Self::HOLD`] the reading's sparser verdict is ignored. Stepping up
+    /// beyond what the reading allows was tried: a step that fails costs the frames the
+    /// decoder decoded for nothing, and a 6K 59.94p clip at every third frame paid
+    /// 50–60 cancelled frames and a cascade of back-offs for each try at every second one; a
+    /// stale reading is refreshed by asking for a few more frames at once instead.
+    fn settle(&mut self, chosen: (i64, i64), lag: Option<i64>, now: Instant) -> (i64, i64) {
+        let density = |(keep, of): (i64, i64)| keep as f64 / of.max(1) as f64;
+        let Some(in_use) = self.pattern else { return chosen };
+        let Some(lag) = lag else {
+            // nothing shown yet: no reason to ask for more than before
+            return if density(chosen) > density(in_use) { in_use } else { chosen };
+        };
+        let step = in_use.1.max(1);
+        // count this refresh; close the window once it is full
+        let (mut late_window, mut closed) = (false, false);
+        match &mut self.window {
+            Some((since, n, late, ok)) if now.saturating_duration_since(*since) < Self::WINDOW => {
+                *n += 1;
+                *late += (lag > step) as u32;
+                // on time: no further behind than the frames the pattern leaves out of each group
+                *ok += (lag <= step - in_use.0.clamp(1, step)) as u32;
+            }
+            w => {
+                if let Some((_, n, late, ok)) = *w {
+                    closed = true;
+                    late_window = late.saturating_mul(5) >= n.saturating_mul(2);
+                    self.on_time_windows = if ok.saturating_mul(10) >= n.saturating_mul(9) { self.on_time_windows.saturating_add(1) } else { 0 };
+                }
+                *w = Some((now, 1, (lag > step) as u32, (lag <= step - in_use.0.clamp(1, step)) as u32));
+            }
+        }
+        let holding = self.stepped_up.filter(|(at, _)| now.saturating_duration_since(*at) < Self::HOLD);
+        if self.stepped_up.is_some() && holding.is_none() {
+            // the step up held: trying again later starts from the base cooldown
+            self.stepped_up = None;
+            self.cooldown = Self::COOLDOWN;
+        }
+        let recovering = self.backed_off_at.is_some_and(|a| now.saturating_duration_since(a) < Self::RECOVER);
+        if closed && late_window && !recovering && density(chosen) >= density(in_use) {
+            let back = match holding {
+                Some((_, before)) => {
+                    self.cooldown = self.cooldown.max(Self::COOLDOWN).saturating_mul(2).min(Self::MAX_COOLDOWN);
+                    before
+                }
+                None => {
+                    self.cooldown = Self::COOLDOWN;
+                    next_sparser(in_use)
+                }
+            };
+            self.backed_off_at = Some(now);
+            self.stepped_up = None;
+            self.on_time_windows = 0;
+            return back;
+        }
+        if holding.is_some() && density(chosen) < density(in_use) {
+            return in_use;
+        }
+        let slack = closed && self.on_time_windows >= Self::SLACK_WINDOWS;
+        let cooled = self.backed_off_at.is_none_or(|a| now.saturating_duration_since(a) >= self.cooldown.max(Self::COOLDOWN));
+        if density(chosen) > density(in_use) {
+            if !(slack && cooled) {
+                return in_use;
+            }
+            self.stepped_up = Some((now, in_use));
+            self.on_time_windows = 0;
+            return chosen;
+        }
+        chosen
+    }
+
+    /// The source measures its own rate and its last reading is older than [`Self::FRESH_FOR`]:
+    /// a sparse plan keeps too few requests in flight for the source to measure itself.
+    fn reading_stale(&self, now: Instant) -> bool {
+        self.active && self.reports_rate && self.fresh_at.is_none_or(|f| now.saturating_duration_since(f) > Self::FRESH_FOR)
+    }
 
     /// A playback job finished: `delivery` is what its sources said (`None`: none of them is
     /// throughput-bound), `decoded` whether it asked any source for a frame at all (a frame past
@@ -163,6 +310,10 @@ impl Throughput {
         self.misses = 0;
         self.active = true;
         let now = Instant::now();
+        self.reports_rate |= d.rate.is_some();
+        if d.fresh {
+            self.fresh_at = Some(now);
+        }
         if let Some(took) = took.filter(|t| t.is_finite() && *t >= 0.0) {
             // late is worse than early: rise fast, settle slowly
             let l = self.model.latency;
@@ -173,6 +324,8 @@ impl Throughput {
             } else {
                 l * 0.8 + took * 0.2
             };
+            let s = self.model.latency_slow;
+            self.model.latency_slow = if s == 0.0 { took } else { s * 0.95 + took * 0.05 };
             if self.completions.len() >= Self::COMPLETIONS {
                 self.completions.pop_front();
             }
@@ -216,8 +369,9 @@ pub struct FrameStats {
     pub source_ms: f64,
     pub render_ms: f64,
     pub job_ms: f64,
-    /// The most recent jobs: (source ms, render ms).
-    pub recent: VecDeque<(f32, f32)>,
+    /// The most recent jobs: (source ms, render ms, texel preparation ms, plan-cache insert ms);
+    /// the last two are part of the render time of a GPU plan job.
+    pub recent: VecDeque<(f32, f32, f32, f32)>,
 }
 
 impl FrameStats {
@@ -225,7 +379,7 @@ impl FrameStats {
 
     /// JSON for `perf.stats`.
     pub fn to_json(&self) -> serde_json::Value {
-        let pct = |f: &dyn Fn(&(f32, f32)) -> f32, p: f64| -> f64 {
+        let pct = |f: &dyn Fn(&(f32, f32, f32, f32)) -> f32, p: f64| -> f64 {
             let mut v: Vec<f32> = self.recent.iter().map(f).collect();
             if v.is_empty() {
                 return 0.0;
@@ -240,6 +394,8 @@ impl FrameStats {
             "requestHitRate": if req == 0 { 0.0 } else { self.request_hits as f64 / req as f64 },
             "decodeMs": {"mean": self.source_ms / n, "p50": pct(&|r| r.0, 0.5), "p95": pct(&|r| r.0, 0.95)},
             "renderMs": {"mean": self.render_ms / n, "p50": pct(&|r| r.1, 0.5), "p95": pct(&|r| r.1, 0.95)},
+            "prepareMs": {"p50": pct(&|r| r.2, 0.5), "p95": pct(&|r| r.2, 0.95)},
+            "insertMs": {"p50": pct(&|r| r.3, 0.5), "p95": pct(&|r| r.3, 0.95)},
             "jobMsMean": self.job_ms / n,
         })
     }
@@ -340,7 +496,7 @@ impl filmcraft_media::MediaSource for TimedSource {
                     (Some(a), Some(b)) => Some(a.min(b)),
                     (a, b) => a.or(b),
                 };
-                c.set(Some(filmcraft_media::FrameDelivery { independent: true, rate }));
+                c.set(Some(filmcraft_media::FrameDelivery { independent: true, rate, fresh: m.fresh || d.fresh }));
             });
         }
         DECODED.with(|c| c.set(true));
@@ -398,8 +554,8 @@ struct PlanCache {
 /// Frames playback may hold ahead of the playhead when the cache holds `capacity` of them:
 /// all of `depth` while they fit, else what fits beside the frame on screen and one behind it.
 /// Decoders that run a little faster than the frames are due would otherwise fill the cache
-/// with frames far ahead and evict the one due next (a 6K half-resolution plan is 123 MB,
-/// eight to the budget, and the prefetch runs 14 deep).
+/// with frames far ahead and evict the one due next (a 6K half-resolution float plan is 123 MB,
+/// eight to the budget, while the prefetch runs 14 deep).
 fn lookahead(capacity: usize, depth: i64) -> i64 {
     depth.min(i64::try_from(capacity).unwrap_or(i64::MAX).saturating_sub(2)).max(2)
 }
@@ -408,8 +564,8 @@ fn lookahead(capacity: usize, depth: i64) -> i64 {
 /// looked up and when it was inserted: entries looked up since they were inserted (shown, or
 /// scrubbed past), least recently used first; then the ones never looked up, oldest first.
 /// Playback prefetches frames ahead of the playhead, and nothing looks at one until it is due:
-/// under plain LRU they were the oldest entries, and a 6K half-resolution frame (123 MB as a
-/// plan, eight to the budget) decoded 26 frames ahead was evicted before the playhead reached
+/// under plain LRU they were the oldest entries, and a 6K half-resolution frame (then 123 MB as
+/// a plan, eight to the budget) decoded 26 frames ahead was evicted before the playhead reached
 /// it, while the frames behind the playhead stayed.
 fn eviction_key(used: u64, inserted: u64) -> (bool, u64) {
     (used == inserted, used)
@@ -448,10 +604,33 @@ impl PlanCache {
                 if self.map.len() <= Self::MAX && self.bytes <= Self::BUDGET {
                     break;
                 }
-                self.map.remove(&k);
+                if let Some((p, ..)) = self.map.remove(&k) {
+                    recycle_plan(p);
+                }
                 self.bytes -= b;
             }
         }
+    }
+}
+
+/// An evicted plan's decoded frames go back to the frame pool when nothing else holds them (a
+/// 6K camera-RAW frame is 41 MB: allocated fresh for every frame, it page-faults for ~20 ms on
+/// the worker; see `filmcraft_frame::pool`).
+fn recycle_plan(plan: Arc<GpuPlan>) {
+    use filmcraft_render::plan::{FramePlan, PlanStep};
+    let Ok(p) = Arc::try_unwrap(plan) else { return };
+    let layers = |ls: Vec<filmcraft_render::plan::PlanLayer>| ls.into_iter().for_each(|l| filmcraft_frame::pool::recycle(l.frame));
+    match p.plan {
+        FramePlan::Layers { layers: ls, .. } => layers(ls),
+        FramePlan::Composite { steps, .. } => {
+            for s in steps {
+                match s {
+                    PlanStep::Layers(ls) => layers(ls),
+                    PlanStep::Transition { inputs, .. } => inputs.into_iter().for_each(&layers),
+                }
+            }
+        }
+        FramePlan::Image(_) => {}
     }
 }
 
@@ -522,37 +701,133 @@ pub fn playback_plan(render_cost: f64, fps: f64, workers: usize) -> (i64, i64) {
     (frames_per_job.ceil() as i64, load.ceil() as i64)
 }
 
-/// Which frames playback asks for from a throughput-bound source (frames decode independently,
-/// [`SourceRate`]): `(lead, stride)` like [`playback_plan`]. `stride` is what the source
-/// delivers against what the sequence needs (25 fps under 59.94: every third frame, 20 fps
-/// evenly, instead of all of them each a little late), and `lead` its latency in frames with a
-/// quarter and a frame of slack, so a frame started that early is ready when it is due.
-pub fn throughput_plan(model: SourceRate, fps: f64) -> (i64, i64) {
-    let stride = match model.rate {
-        // a tenth of a frame of tolerance: a source just short of the rate (23 under 24) is
-        // better asked for every frame, dropping the odd late one, than for every other frame
-        Some(r) if r > 0.0 && r < fps => (fps / r - 0.1).ceil().max(1.0) as i64,
-        _ => 1,
-    };
-    let lead = (model.latency * fps * 1.25).ceil() as i64 + 1;
-    (lead.clamp(1, 600), stride.clamp(1, 64))
+/// The patterns a throughput-bound plan may keep, `(keep, of)` frames, densest first: every
+/// frame, three of four, two of three, every second, two of five, three of eight, every third,
+/// every fourth, then every n-th. Three of four is what a 6K 24p clip gets from a pipeline that
+/// manages 20 fps, instead of every second frame. Two of five is 24 fps of a 59.94p clip: a 6K
+/// half-resolution pipeline delivers 25–27 fps, and without it the plan fell to every third
+/// frame (20 fps) where 22.5–24 fps is possible.
+const PATTERNS: [(i64, i64); 8] = [(1, 1), (3, 4), (2, 3), (1, 2), (2, 5), (3, 8), (1, 3), (1, 4)];
+const SPARSEST: i64 = 64;
+
+/// The densest pattern whose share of the frames the source can deliver (`ratio` = frames per
+/// second it delivers over the sequence's), with hysteresis against `previous`: a sparser
+/// pattern once the share is 10 % short of the current one (the source fell behind; a source
+/// that just keeps up reads as exactly the sequence rate, since saturation is what is measured,
+/// and must not be read as falling behind on noise), a denser one only with 5 % to spare. The
+/// reading alone is not what decides at the margin: [`Throughput::settle`] backs off as soon
+/// as the picture runs late and waits for slack before asking for more, so a pipeline a few
+/// per cent short of every frame does not fall behind for seconds before the reading says so.
+fn choose_pattern(ratio: f64, previous: Option<(i64, i64)>) -> (i64, i64) {
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return previous.unwrap_or((1, SPARSEST));
+    }
+    let density = |(keep, of): (i64, i64)| keep as f64 / of.max(1) as f64;
+    let fit = PATTERNS.into_iter().find(|p| density(*p) <= ratio).unwrap_or_else(|| (1, ((1.0 / ratio).ceil() as i64).clamp(5, SPARSEST)));
+    match previous {
+        Some(p) if density(p) > ratio => {
+            if ratio < density(p) * 0.9 {
+                fit
+            } else {
+                p
+            }
+        }
+        Some(p) if density(fit) > density(p) && ratio < density(fit) * 1.05 => p,
+        _ => fit,
+    }
 }
 
-/// The frames a playback refresh at `cur` asks for: `ahead` of them from `lead` frames on,
-/// `stride` apart. `anchored` ones are multiples of the stride, so the set does not shift with
-/// the playhead at every refresh: the frames between are left out for good, not asked for a
-/// refresh later when they could not be ready either.
-fn planned_frames(cur: i64, dir: i64, step: i64, lead: i64, stride: i64, ahead: i64, anchored: bool) -> impl Iterator<Item = i64> {
-    let unit = stride.saturating_mul(step).max(1);
-    let mut first = cur.saturating_add(lead.saturating_mul(step).saturating_mul(dir));
-    if anchored && stride > 1 {
-        let r = first.rem_euclid(unit);
-        if r != 0 {
-            first = first.saturating_add(if dir > 0 { unit - r } else { -r });
-        }
+/// The next sparser pattern after `p`: the next of [`PATTERNS`], then every n-th.
+fn next_sparser(p: (i64, i64)) -> (i64, i64) {
+    match PATTERNS.iter().position(|q| *q == p) {
+        Some(i) => PATTERNS.get(i + 1).copied().unwrap_or((1, p.1.saturating_add(1).min(SPARSEST))),
+        None => (1, p.1.max(1).saturating_add(1).min(SPARSEST)),
     }
-    (0..ahead.max(0)).map(move |i| first.saturating_add(i.saturating_mul(unit).saturating_mul(dir)))
 }
+
+/// Whether frame `f` is in the pattern: the frames where `f × keep / of` crosses an integer,
+/// `keep` of every `of`, spread evenly and the same set whatever the playhead is at.
+fn in_pattern(f: i64, keep: i64, of: i64) -> bool {
+    let of = of.max(1);
+    let keep = keep.clamp(1, of);
+    keep == of || f.saturating_mul(keep).div_euclid(of) != f.saturating_sub(1).saturating_mul(keep).div_euclid(of)
+}
+
+/// Which frames playback asks for from a throughput-bound source (frames decode independently,
+/// [`SourceRate`]): `(lead, keep, of)`. The plan keeps `keep` of every `of` frames
+/// ([`choose_pattern`]) according to what the source delivers against what the sequence needs,
+/// bounded as well by the frame workers (each holds a job for the source's latency: six workers
+/// at 330 ms sustain 18 frames per second whatever the decoder manages), so that a 25 fps
+/// decoder under 59.94 shows every fourth frame evenly instead of all of them each a little
+/// late. `lead` is the latency in frames with a quarter and a frame of slack, so a frame started
+/// that early is ready when it is due. `previous` is the pattern in use, for hysteresis.
+pub fn throughput_plan(model: SourceRate, fps: f64, workers: usize, previous: Option<(i64, i64)>) -> (i64, i64, i64) {
+    let (keep, of) = match capacity_ratio(model, fps, workers) {
+        Some(r) => choose_pattern(r, previous),
+        None => (1, 1),
+    };
+    let lead = (model.latency * fps * 1.25).ceil() as i64 + 1;
+    (lead.clamp(1, 600), keep, of)
+}
+
+/// What the source delivers against what the sequence needs: the lesser of the source's rate
+/// and the workers' bound (`workers / latency`, slowly smoothed), over `fps`; `None` with
+/// nothing measured yet.
+fn capacity_ratio(model: SourceRate, fps: f64, workers: usize) -> Option<f64> {
+    let rate = model.rate.filter(|r| r.is_finite() && *r > 0.0);
+    let slow = if model.latency_slow > 0.0 { model.latency_slow } else { model.latency };
+    let by_workers = (slow.is_finite() && slow > 0.0).then(|| workers.max(1) as f64 / slow);
+    let capacity = match (rate, by_workers) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    capacity.filter(|_| fps > 0.0).map(|c| c / fps)
+}
+
+/// The frames a playback refresh at `cur` asks for: `ahead` of them from `lead` frames on.
+/// Plain (`anchored` false): every `of`-th. Anchored: the frames of the pattern `keep` of `of`
+/// ([`in_pattern`]), so the set does not shift with the playhead at every refresh: the frames
+/// between are left out for good, not asked for a refresh later when they could not be ready
+/// either.
+fn planned_frames(cur: i64, dir: i64, step: i64, lead: i64, keep: i64, of: i64, ahead: i64, anchored: bool) -> Vec<i64> {
+    let (step, of) = (step.max(1), of.max(1));
+    let keep = keep.clamp(1, of);
+    let first = cur.saturating_add(lead.saturating_mul(step).saturating_mul(dir));
+    let ahead = ahead.max(0);
+    if !anchored || keep == of {
+        let unit = if anchored { step } else { of.saturating_mul(step) };
+        return (0..ahead).map(|i| first.saturating_add(i.saturating_mul(unit).saturating_mul(dir))).collect();
+    }
+    let mut out = Vec::with_capacity(ahead as usize);
+    let mut f = first;
+    // every `of` consecutive frames hold at least `keep` of the pattern: the walk is bounded
+    for _ in 0..ahead.saturating_mul(of).saturating_add(of) {
+        if out.len() as i64 >= ahead {
+            break;
+        }
+        if in_pattern(f, keep, of) {
+            out.push(f);
+        }
+        f = f.saturating_add(step.saturating_mul(dir));
+    }
+    out
+}
+
+/// The pattern `FILMCRAFT_PLAYBACK_PATTERN=keep/of` pins (read once), if any.
+fn forced_pattern() -> Option<(i64, i64)> {
+    static FORCED: std::sync::OnceLock<Option<(i64, i64)>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| {
+        let s = std::env::var("FILMCRAFT_PLAYBACK_PATTERN").ok()?;
+        let (k, n) = s.trim().split_once('/')?;
+        let (k, n) = (k.trim().parse::<i64>().ok()?, n.trim().parse::<i64>().ok()?);
+        (n >= 1 && (1..=n).contains(&k) && n <= SPARSEST).then_some((k, n))
+    })
+}
+
+/// Frames of the pattern asked for beyond the look-ahead while a throughput-bound source's
+/// reading is stale: a pipelined decoder's slots and a couple more, so its replies are
+/// saturated ones.
+const REMEASURE_BURST: i64 = 6;
 
 /// How far behind the playhead a running job on a throughput-bound source is left to finish:
 /// its decoder has the frame in hand (cancelling it saves nothing), and the monitor shows a late
@@ -607,8 +882,12 @@ impl FrameServer {
         Self { shared, pool, services, previews, repaint }
     }
 
-    /// The default number of frame workers for this machine.
+    /// The default number of frame workers for this machine. `FILMCRAFT_FRAME_WORKERS` (2..=32)
+    /// overrides it: a bake-off knob, not a user setting.
     pub fn default_workers() -> usize {
+        if let Some(n) = std::env::var("FILMCRAFT_FRAME_WORKERS").ok().and_then(|s| s.trim().parse::<usize>().ok()) {
+            return n.clamp(2, 32);
+        }
         std::thread::available_parallelism().map(|n| n.get().clamp(2, 6)).unwrap_or(3)
     }
 
@@ -751,16 +1030,24 @@ impl FrameServer {
         let fps = rate.as_f64() * speed.abs().max(1.0) / step as f64;
         let model = self.source_rate();
         // A throughput-bound source (camera RAW) sets the plan when it is the slower constraint.
-        let (lead, stride, anchored) = match (preroll, model) {
-            (true, _) => (1, 1, false),
+        let (lead, keep, of, anchored) = match (preroll, model) {
+            (true, _) => (1, 1, 1, false),
             (false, None) => {
                 let (l, s) = playback_plan(self.render_cost(), fps, self.shared.workers);
-                (l, s, false)
+                (l, 1, s, false)
             }
             (false, Some(m)) => {
                 let (l, s) = playback_plan(self.render_cost(), fps, self.shared.workers);
-                let (lt, st) = throughput_plan(m, fps);
-                (l.max(lt), s.max(st), true)
+                // forward play: how late the picture is tells the plan what the reading cannot
+                let (in_use, judging) = {
+                    let mut t = self.shared.throughput.lock().unwrap_or_else(|e| e.into_inner());
+                    (t.pattern, t.judging(true, Instant::now()))
+                };
+                let lag = (dir > 0 && judging).then(|| self.lag_of(key, in_use));
+                let (lt, keep, of) = self.throughput_plan(m, fps, lag);
+                // the sparser of the two
+                let (keep, of) = if keep * s < of { (keep, of) } else { (1, s) };
+                (l.max(lt), keep, of, true)
             }
         };
         if lead <= 1 {
@@ -769,10 +1056,20 @@ impl FrameServer {
         }
         // During preroll the clock has not started: only the frames that gate start, not a
         // prefetch run that walks the rest of a LongGOP and evicts the playhead pictures.
-        let depth = lookahead(self.plan_capacity(key.target), prefetch_depth(speed));
+        // A throughput-bound source whose reading has gone stale (a sparse plan keeps too few
+        // requests in flight for it to measure itself; a cold start read 68 fps for a 130 fps
+        // pipeline and the plan stayed at every second frame) is asked for a few more frames of
+        // the pattern at once, enough to fill its decoder's slots and measure again: frames the
+        // plan would ask for a moment later anyway, nothing beyond the pattern.
+        let burst = if !preroll && model.is_some() && self.shared.throughput.lock().unwrap_or_else(|e| e.into_inner()).reading_stale(Instant::now()) {
+            REMEASURE_BURST
+        } else {
+            0
+        };
+        let depth = lookahead(self.plan_capacity(key.target), prefetch_depth(speed) + burst);
         let ahead = if preroll { (PREROLL_FRAMES - 1).max(0) } else { depth };
         let mut prio = 1;
-        for f in planned_frames(key.frame, dir, step, lead, stride, ahead, anchored) {
+        for f in planned_frames(key.frame, dir, step, lead, keep, of, ahead, anchored) {
             if f >= 0 {
                 // forward play: frames before the playhead are late (reverse play skips nothing)
                 let late = (!preroll && dir > 0).then(|| rate.tick_of(f) - rate.tick_of(key.frame));
@@ -780,27 +1077,35 @@ impl FrameServer {
             }
             prio += 1;
         }
-        let mut span = (lead + ahead * stride) * step + 26;
+        // Queued frames beyond the planned run are stale: an ordinary source may keep a few
+        // (its decoder reaches them in order anyway), a throughput-bound one only a pattern's
+        // worth (its decoder would spend the look-ahead on them and evict the frames due next).
+        let mut span = (lead + ahead * of) * step + if anchored { of * step } else { 26 };
         if preroll && let Some(m) = model {
             // A throughput-bound source's planned run as well, from right after the preroll
             // frames: the clock has not started, so every frame decoded now is ahead of it,
             // and the clock must not start into frames nobody asked for.
-            let (lt, st) = throughput_plan(m, fps);
+            self.shared.throughput.lock().unwrap_or_else(|e| e.into_inner()).judging(false, Instant::now());
+            let (lt, keep, of) = self.throughput_plan(m, fps, None);
             let (lt, n) = (lt.min(PREROLL_FRAMES), depth);
-            for f in planned_frames(key.frame, dir, step, lt, st, n, true) {
+            for f in planned_frames(key.frame, dir, step, lt, keep, of, n, true) {
                 if f >= 0 {
                     self.request_job(FrameKey { frame: f, ..key }, rate.tick_of(f), scale, project, prio, true, None);
                 }
                 prio += 1;
             }
-            span = span.max((lt + n * st) * step + 26);
+            span = span.max((lt + n * of) * step + of * step);
         }
         let (target, rev, cur) = (key.target, key.revision, key.frame);
         // Queued frames behind the playhead are late; a running one on a throughput-bound
         // source is left to finish while it is within the grace (its frame is still shown).
         let grace = if model.is_some() { LATE_GRACE } else { 0 };
         let wanted = |k: &FrameKey, behind: i64| k.target != target || (k.revision == rev && (k.frame - cur) * dir >= -behind && (k.frame - cur).abs() < span);
-        self.retain_playback(|k| wanted(k, 0), |k| wanted(k, grace));
+        // An anchored plan whose pattern just got sparser leaves the frames it no longer keeps
+        // queued beyond the lead: dropped, or they would be decoded at the expense of the frames
+        // the pattern does keep (a failed step up left both patterns' frames in the queue).
+        let planned = |k: &FrameKey| !anchored || k.target != target || (k.frame - cur) * dir < lead * step || in_pattern(k.frame, keep, of);
+        self.retain_playback(|k| wanted(k, 0) && planned(k), |k| wanted(k, grace));
     }
 
     /// Whether playback can start at `key`: the next [`PREROLL_FRAMES`] frames (up to `last`)
@@ -824,6 +1129,13 @@ impl FrameServer {
         }
     }
 
+    /// The plan cache's look-ahead for playback and the bytes of the plan inserted last, for
+    /// `perf.stats`.
+    pub fn plan_lookahead(&self) -> (i64, usize) {
+        let p = self.shared.plans.lock().unwrap_or_else(|e| e.into_inner());
+        (lookahead(p.capacity(), prefetch_depth(1.0)), p.last_bytes)
+    }
+
     /// What playback learned about the throughput-bound sources it is playing, while it is
     /// playing one (see [`throughput_plan`]); `None` for ordinary sources.
     pub fn source_rate(&self) -> Option<SourceRate> {
@@ -831,16 +1143,51 @@ impl FrameServer {
         t.active.then_some(t.model)
     }
 
-    /// The plan playback at `fps` would use now: `(lead, stride)` (see [`playback_plan`] and
-    /// [`throughput_plan`]), for `perf.stats`.
-    pub fn plan_for(&self, fps: f64) -> (i64, i64) {
+    /// [`throughput_plan`] for the model, remembering the pattern for the next refresh.
+    fn throughput_plan(&self, model: SourceRate, fps: f64, lag: Option<i64>) -> (i64, i64, i64) {
+        let mut t = self.shared.throughput.lock().unwrap_or_else(|e| e.into_inner());
+        let (lead, keep, of) = throughput_plan(model, fps, self.shared.workers, t.pattern);
+        let (keep, of) = t.settle((keep, of), lag, Instant::now());
+        // `FILMCRAFT_PLAYBACK_PATTERN=keep/of` pins the pattern (a bake-off knob: what a pipeline
+        // does under a given demand, whatever it reads its capacity as)
+        let (keep, of) = forced_pattern().unwrap_or((keep, of));
+        t.pattern = Some((keep, of));
+        (lead, keep, of)
+    }
+
+    /// How many frames the newest ready picture of the pattern in use is behind `key` (0: `key`
+    /// itself is ready), up to `LATE_GRACE × 4` when nothing that recent is, for
+    /// [`Throughput::settle`]. Only the pattern's own frames count: after a step up, the frames
+    /// decoded for the sparser pattern before it keep the picture looking on time for as long
+    /// as they were prefetched (a second), while the denser pattern's frames fall behind unseen.
+    fn lag_of(&self, key: FrameKey, pattern: Option<(i64, i64)>) -> i64 {
+        let max_back = LATE_GRACE * 4;
+        let (keep, of) = pattern.unwrap_or((1, 1));
+        let counts = |d: i64| in_pattern(key.frame - d, keep, of);
+        match key.target {
+            Target::SequencePlan(_) => {
+                let plans = self.shared.plans.lock().unwrap_or_else(|e| e.into_inner());
+                (0..=max_back).find(|d| counts(*d) && plans.map.contains_key(&FrameKey { frame: key.frame - d, ..key })).unwrap_or(max_back)
+            }
+            _ => (0..=max_back).find(|d| counts(*d) && self.get(&FrameKey { frame: key.frame - d, ..key }).is_some()).unwrap_or(max_back),
+        }
+    }
+
+    /// The plan playback at `fps` would use now: `(lead, keep, of)` (see [`playback_plan`] and
+    /// [`throughput_plan`]), for `perf.stats`; it does not change the pattern in use.
+    pub fn plan_for(&self, fps: f64) -> (i64, i64, i64) {
         let (l, s) = playback_plan(self.render_cost(), fps, self.shared.workers);
         match self.source_rate() {
             Some(m) => {
-                let (lt, st) = throughput_plan(m, fps);
-                (l.max(lt), s.max(st))
+                // the pattern in use (settled on the picture, see [`Throughput::settle`]), not
+                // only what the reading would choose
+                let previous = self.shared.throughput.lock().unwrap_or_else(|e| e.into_inner()).pattern;
+                let (lt, keep, of) = throughput_plan(m, fps, self.shared.workers, previous);
+                let (keep, of) = previous.unwrap_or((keep, of));
+                let (keep, of) = if keep * s < of { (keep, of) } else { (1, s) };
+                (l.max(lt), keep, of)
             }
-            None => (l, s),
+            None => (l, 1, s),
         }
     }
 
@@ -1062,6 +1409,8 @@ fn run_job(sh: &Shared, job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Ser
     // cancelled one, its result is not cached (the caller retries it).
     let _ = filmcraft_media::pending::take();
     let mut loading = false;
+    // (texel preparation, plan-cache insert) of a GPU plan job, for `perf.stats`
+    let mut stages = (Duration::ZERO, Duration::ZERO);
     let preview = filmcraft_media::cancel::with_cancel(&job.cancel, || {
         filmcraft_media::cancel::with_catch_up(job.catch_up, || {
             filmcraft_media::cancel::with_draft(job.key.draft, || {
@@ -1071,8 +1420,11 @@ fn run_job(sh: &Shared, job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Ser
                         loading = filmcraft_media::pending::take();
                         if !job.cancel.load(Ordering::Relaxed) && !loading {
                             // Convert texels for upload here, not on the UI thread when the frame is shown.
+                            let t0 = Instant::now();
                             let prepared = filmcraft_gpu::prepare(&plan);
+                            let t1 = Instant::now();
                             sh.plans.lock().unwrap_or_else(|e| e.into_inner()).insert(job.key, GpuPlan { plan, prepared });
+                            stages = (t1.saturating_duration_since(t0), t1.elapsed());
                         }
                         pv
                     } else {
@@ -1123,7 +1475,7 @@ fn run_job(sh: &Shared, job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Ser
         if st.recent.len() >= FrameStats::RECENT {
             st.recent.pop_front();
         }
-        st.recent.push_back((src_ms as f32, render_ms as f32));
+        st.recent.push_back((src_ms as f32, render_ms as f32, stages.0.as_secs_f32() * 1e3, stages.1.as_secs_f32() * 1e3));
     }
     if profiling {
         let (source_wall, source_cpu) = SOURCE_TIME.with(|s| s.get());
@@ -1222,7 +1574,10 @@ fn render_job(job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Services>, pr
 
 #[cfg(test)]
 mod tests {
-    use super::{PlaybackMeter, SourceRate, Target, Throughput, background_work, eviction_key, lookahead, planned_frames, playback_plan, throughput_plan};
+    use super::{
+        PlaybackMeter, SPARSEST, SourceRate, Target, Throughput, background_work, choose_pattern, eviction_key, in_pattern, lookahead, next_sparser,
+        planned_frames, playback_plan, throughput_plan,
+    };
     use filmcraft_media::FrameDelivery;
     use filmcraft_project::ItemId;
 
@@ -1261,27 +1616,169 @@ mod tests {
 
     #[test]
     fn throughput_plan_asks_for_what_the_source_delivers_early_enough() {
+        let plan = |rate: Option<f64>, latency, fps| throughput_plan(SourceRate { rate, latency, latency_slow: latency }, fps, 6, None);
         // a 25 fps camera RAW decoder under 59.94 fps, 240 ms from a job's start to its frame:
-        // every third frame (20 fps, evenly), started 19 frames ahead (240 ms × 1.25 + 1 frame)
-        let (lead, stride) = throughput_plan(SourceRate { rate: Some(25.0), latency: 0.24 }, 59.94);
-        assert_eq!((lead, stride), (19, 3));
+        // two of every five frames (24 fps, evenly), started 19 frames ahead (240 ms × 1.25 + 1)
+        assert_eq!(plan(Some(25.0), 0.24, 59.94), (19, 2, 5));
         // keeping up: every frame, still started early enough
-        assert_eq!(throughput_plan(SourceRate { rate: Some(30.0), latency: 0.1 }, 29.97), (5, 1));
-        // just short of the rate: every frame, the odd late one is dropped (cheaper than half)
-        assert_eq!(throughput_plan(SourceRate { rate: Some(23.0), latency: 0.1 }, 24.0).1, 1);
-        assert_eq!(throughput_plan(SourceRate { rate: Some(31.0), latency: 0.1 }, 60.0).1, 2);
-        assert_eq!(throughput_plan(SourceRate { rate: Some(20.0), latency: 0.1 }, 60.0).1, 3);
+        assert_eq!(plan(Some(30.0), 0.1, 29.97), (5, 1, 1));
+        // short of the rate: three of four frames (18 fps), not every second one
+        assert_eq!(plan(Some(23.0), 0.1, 24.0), (5, 3, 4));
+        assert_eq!(plan(Some(31.0), 0.1, 60.0), (9, 1, 2));
+        assert_eq!(plan(Some(20.5), 0.1, 60.0), (9, 1, 3));
+        // six workers each holding a job for 330 ms sustain 18 fps whatever the decoder says
+        assert_eq!(plan(Some(25.0), 0.33, 59.94), (26, 1, 4));
+        assert_eq!(throughput_plan(SourceRate { rate: Some(25.0), latency: 0.33, latency_slow: 0.33 }, 59.94, 8, None), (26, 2, 5));
+        // the workers' bound follows the slow average: a spike in the fast one sizes the lead only
+        assert_eq!(throughput_plan(SourceRate { rate: Some(150.0), latency: 0.06, latency_slow: 0.04 }, 119.88, 6, Some((1, 1))), (10, 1, 1));
         // nothing measured yet: every frame from the playhead on
-        assert_eq!(throughput_plan(SourceRate::default(), 59.94), (1, 1));
-        assert_eq!(throughput_plan(SourceRate { rate: None, latency: 0.24 }, 59.94).1, 1);
+        assert_eq!(plan(None, 0.0, 59.94), (1, 1, 1));
+        // no rate from the source yet, but the workers' bound already
+        assert_eq!(plan(None, 0.24, 59.94).2, 5);
         // hostile values stay bounded
-        assert_eq!(throughput_plan(SourceRate { rate: Some(0.001), latency: 1e9 }, 60.0), (600, 64));
-        assert_eq!(throughput_plan(SourceRate { rate: Some(-1.0), latency: f64::NAN }, 60.0).1, 1);
+        assert_eq!(plan(Some(0.001), 1e9, 60.0), (600, 1, 64));
+        assert_eq!(plan(Some(-1.0), f64::NAN, 60.0), (1, 1, 1));
+    }
+
+    #[test]
+    fn pattern_choice_has_hysteresis() {
+        // the densest pattern the share allows
+        assert_eq!(choose_pattern(1.2, None), (1, 1));
+        assert_eq!(choose_pattern(0.8, None), (3, 4));
+        assert_eq!(choose_pattern(0.7, None), (2, 3));
+        assert_eq!(choose_pattern(0.45, None), (2, 5), "a 27 fps pipeline under 59.94p shows 24 fps");
+        assert_eq!(choose_pattern(0.38, None), (3, 8));
+        assert_eq!(choose_pattern(0.34, None), (1, 3));
+        assert_eq!(choose_pattern(0.1, None), (1, 10));
+        assert_eq!(choose_pattern(1e-9, None), (1, 64));
+        // falling behind by more than 10 %: sparser; denser only with 5 % to spare
+        assert_eq!(choose_pattern(0.29, Some((1, 3))), (1, 4));
+        assert_eq!(choose_pattern(0.31, Some((1, 3))), (1, 3));
+        assert_eq!(choose_pattern(0.93, Some((1, 1))), (1, 1), "keeping up reads as ~1.0");
+        assert_eq!(choose_pattern(0.34, Some((1, 4))), (1, 4));
+        assert_eq!(choose_pattern(0.36, Some((1, 4))), (1, 3));
+        assert_eq!(choose_pattern(1.0, Some((3, 4))), (3, 4));
+        assert_eq!(choose_pattern(1.04, Some((3, 4))), (3, 4));
+        assert_eq!(choose_pattern(1.06, Some((3, 4))), (1, 1));
+        assert_eq!(choose_pattern(0.72, Some((3, 4))), (3, 4));
+        assert_eq!(choose_pattern(0.67, Some((3, 4))), (2, 3));
+        assert_eq!(choose_pattern(1.25, Some((3, 4))), (1, 1));
+        assert_eq!(choose_pattern(f64::NAN, Some((1, 3))), (1, 3));
+        // the next sparser pattern, then every n-th, bounded
+        assert_eq!(next_sparser((1, 1)), (3, 4));
+        assert_eq!(next_sparser((1, 2)), (2, 5));
+        assert_eq!(next_sparser((3, 8)), (1, 3));
+        assert_eq!(next_sparser((1, 4)), (1, 5));
+        assert_eq!(next_sparser((1, 9)), (1, 10));
+        assert_eq!(next_sparser((1, SPARSEST)), (1, SPARSEST));
+        // the pattern spreads its frames evenly and the same way for any playhead
+        let kept = |keep, of| (0..12).filter(|f| in_pattern(*f, keep, of)).collect::<Vec<i64>>();
+        assert_eq!(kept(1, 3), vec![0, 3, 6, 9]);
+        assert_eq!(kept(3, 4), vec![0, 2, 3, 4, 6, 7, 8, 10, 11]);
+        assert_eq!(kept(2, 3), vec![0, 2, 3, 5, 6, 8, 9, 11]);
+        assert_eq!(kept(2, 5), vec![0, 3, 5, 8, 10], "gaps of three and two frames, alternating");
+        assert_eq!(kept(1, 1).len(), 12);
+        assert!(in_pattern(i64::MAX, 3, 4) || !in_pattern(i64::MAX, 3, 4), "no overflow");
+    }
+
+    /// Refreshes every 50 ms from `from` to `to` (ms), each with `lag`; the pattern after the
+    /// last. The pattern in use follows what `settle` returns, as the frame server's does.
+    fn drive(t: &mut Throughput, chosen: (i64, i64), lag: i64, t0: super::Instant, from: u64, to: u64) -> (i64, i64) {
+        let mut out = t.pattern.unwrap_or(chosen);
+        let mut ms = from;
+        while ms <= to {
+            out = t.settle(chosen, Some(lag), t0 + std::time::Duration::from_millis(ms));
+            t.pattern = Some(out);
+            ms += 50;
+        }
+        out
+    }
+
+    #[test]
+    fn pattern_backs_off_when_the_picture_runs_late_and_climbs_back_after_slack() {
+        let t0 = super::Instant::now();
+        let mut t = Throughput::default();
+        // the first choice stands; nothing shown yet keeps what is in use unless sparser
+        assert_eq!(t.settle((1, 1), None, t0), (1, 1));
+        t.pattern = Some((1, 1));
+        assert_eq!(t.settle((1, 1), None, t0), (1, 1));
+        assert_eq!(t.settle((3, 4), None, t0), (3, 4));
+        t.pattern = Some((1, 1));
+        // every frame, the reading still says so, but the picture is two frames late: once a
+        // half-second window of that closes, three of four
+        assert_eq!(drive(&mut t, (1, 1), 2, t0, 0, 450), (1, 1));
+        assert_eq!(drive(&mut t, (1, 1), 2, t0, 500, 500), (3, 4));
+        // on time again: no denser within the cooldown (4 s from 500 ms)
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 550, 4400), (3, 4));
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 4450, 4600), (1, 1));
+        // the step up fails within the hold: back to three of four, and the next try waits twice
+        // as long (8 s), then 16 s
+        assert_eq!(drive(&mut t, (1, 1), 2, t0, 4650, 5200), (3, 4));
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 5250, 12950), (3, 4), "8 s cooldown from 5 s");
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 13000, 13300), (1, 1));
+        assert_eq!(drive(&mut t, (1, 1), 2, t0, 13350, 14000), (3, 4), "late in the window closing at 14 s");
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 14050, 29950), (3, 4), "16 s cooldown from 14 s");
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 30000, 30200), (1, 1));
+        // held for three seconds: a later late episode is an ordinary back-off (base cooldown)
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 30250, 34000), (1, 1));
+        assert_eq!(drive(&mut t, (1, 1), 2, t0, 34050, 34500), (3, 4));
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 34550, 38450), (3, 4));
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 38500, 38750), (1, 1), "4 s cooldown from 34.5 s");
+        // a lag that flickers (most frames land, one in three is late) still counts as late
+        let mut t = Throughput { pattern: Some((1, 2)), ..Default::default() };
+        let mut ms = 0;
+        let mut out = (1, 2);
+        while ms <= 600 {
+            out = t.settle((1, 2), Some(if ms % 150 == 0 { 4 } else { 0 }), t0 + std::time::Duration::from_millis(ms));
+            t.pattern = Some(out);
+            ms += 50;
+        }
+        assert_eq!(out, (2, 5), "the next sparser pattern after every second frame");
+        // sparser from the reading is always allowed, and a lag within the pattern's step is fine
+        let mut t = Throughput { pattern: Some((1, 3)), ..Default::default() };
+        assert_eq!(t.settle((1, 4), Some(0), t0), (1, 4));
+        t.pattern = Some((1, 3));
+        assert_eq!(drive(&mut t, (1, 3), 3, t0, 0, 1200), (1, 3));
+        assert_eq!(drive(&mut t, (1, 3), 5, t0, 1250, 1800), (1, 4));
+        // right after backing off (at 1.5 s) the picture is still late: not judged for two seconds
+        assert_eq!(drive(&mut t, (1, 4), 9, t0, 1850, 3450), (1, 4));
+        assert_eq!(drive(&mut t, (1, 4), 9, t0, 3500, 5450), (1, 5));
+        assert_eq!(drive(&mut t, (1, 5), 9, t0, 5500, 5600), (1, 6));
+        // the clock: not judged for two seconds after it starts, and a preroll resets that
+        let mut t = Throughput::default();
+        assert!(!t.judging(false, t0));
+        assert!(!t.judging(true, t0));
+        assert!(!t.judging(true, t0 + std::time::Duration::from_millis(1900)));
+        assert!(t.judging(true, t0 + std::time::Duration::from_millis(2000)));
+        assert!(!t.judging(false, t0 + std::time::Duration::from_millis(2100)));
+        assert!(!t.judging(true, t0 + std::time::Duration::from_millis(2200)));
+    }
+
+    #[test]
+    fn a_stale_reading_asks_for_a_burst_and_never_a_denser_pattern() {
+        use std::time::Duration;
+        let t0 = super::Instant::now();
+        let mut t = Throughput::default();
+        // nothing reported: nothing to refresh
+        assert!(!t.reading_stale(t0));
+        t.job(Some(FrameDelivery { independent: true, rate: Some(25.0), fresh: true }), true, Some(0.2));
+        let now = super::Instant::now();
+        assert!(!t.reading_stale(now));
+        assert!(t.reading_stale(now + Duration::from_millis(2100)));
+        // a source that reports no rate of its own is measured by playback: never stale
+        let mut u = Throughput::default();
+        u.job(Some(FrameDelivery { independent: true, rate: None, fresh: false }), true, Some(0.05));
+        assert!(!u.reading_stale(super::Instant::now() + Duration::from_secs(60)));
+        // the pattern in use is never stepped up beyond the reading's choice, however long on time
+        let mut t = Throughput { pattern: Some((1, 2)), ..Default::default() };
+        assert_eq!(drive(&mut t, (1, 2), 0, t0, 0, 12000), (1, 2));
+        t.pattern = Some((1, 1));
+        assert_eq!(drive(&mut t, (1, 1), 0, t0, 12050, 16000), (1, 1), "nothing denser than every frame");
     }
 
     #[test]
     fn anchored_plan_keeps_the_same_frames_as_the_playhead_moves() {
-        let frames = |cur, dir, anchored| planned_frames(cur, dir, 1, 19, 3, 4, anchored).collect::<Vec<_>>();
+        let frames = |cur, dir, anchored| planned_frames(cur, dir, 1, 19, 1, 3, 4, anchored);
         // multiples of the stride: a refresh one frame later asks for the same frames
         assert_eq!(frames(100, 1, true), vec![120, 123, 126, 129]);
         assert_eq!(frames(101, 1, true), vec![120, 123, 126, 129]);
@@ -1293,31 +1790,36 @@ mod tests {
         assert_eq!(frames(100, -1, true), vec![81, 78, 75, 72]);
         assert_eq!(frames(99, -1, true), vec![78, 75, 72, 69]);
         // 2× speed: the stride is in played frames
-        assert_eq!(planned_frames(100, 1, 2, 19, 3, 3, true).collect::<Vec<_>>(), vec![138, 144, 150]);
-        assert_eq!(planned_frames(0, 1, 1, 1, 1, 3, true).collect::<Vec<_>>(), vec![1, 2, 3]);
-        assert_eq!(planned_frames(i64::MAX, 1, 1, 1, 1, 2, true).count(), 2, "no overflow");
+        assert_eq!(planned_frames(100, 1, 2, 19, 1, 3, 3, true), vec![138, 144, 150]);
+        assert_eq!(planned_frames(0, 1, 1, 1, 1, 1, 3, true), vec![1, 2, 3]);
+        assert!(planned_frames(i64::MAX, 1, 1, 1, 1, 2, 2, true).len() <= 2, "no overflow, and the walk ends");
+        // three of four: the same frames whatever the playhead, one of every four left out
+        assert_eq!(planned_frames(100, 1, 1, 19, 3, 4, 4, true), vec![119, 120, 122, 123]);
+        assert_eq!(planned_frames(101, 1, 1, 19, 3, 4, 4, true), vec![120, 122, 123, 124]);
+        assert_eq!(planned_frames(100, -1, 1, 19, 3, 4, 4, true), vec![80, 79, 78, 76]);
     }
 
     #[test]
     fn throughput_model_follows_the_source_and_clears_for_ordinary_ones() {
-        let raw = Some(FrameDelivery { independent: true, rate: Some(25.0) });
+        let raw = Some(FrameDelivery { independent: true, rate: Some(25.0), fresh: true });
         let mut t = Throughput::default();
         assert!(!t.active);
         t.job(raw, true, Some(0.2));
         assert!(t.active);
-        assert_eq!(t.model, SourceRate { rate: Some(25.0), latency: 0.2 });
+        assert_eq!(t.model, SourceRate { rate: Some(25.0), latency: 0.2, latency_slow: 0.2 });
         // latency rises fast and settles slowly; a cancelled job (no time) still keeps it active
         t.job(raw, true, Some(0.4));
         assert!((t.model.latency - 0.3).abs() < 1e-9);
+        assert!((t.model.latency_slow - 0.21).abs() < 1e-9);
         t.job(raw, true, None);
         assert!(t.active);
         // a source without a rate of its own: measured from completions once there are enough
         let mut u = Throughput::default();
         for _ in 0..5 {
-            u.job(Some(FrameDelivery { independent: true, rate: None }), true, Some(0.05));
+            u.job(Some(FrameDelivery { independent: true, rate: None, fresh: false }), true, Some(0.05));
         }
         assert_eq!(u.model.rate, None);
-        u.job(Some(FrameDelivery { independent: true, rate: None }), true, Some(0.05));
+        u.job(Some(FrameDelivery { independent: true, rate: None, fresh: false }), true, Some(0.05));
         assert!(u.model.rate.is_some_and(|r| r > 100.0), "{:?}", u.model);
         // frames that decode nothing (past the end of the sequence while it loops, a gap, a
         // rendered segment) say nothing about what is playing: the model stays
