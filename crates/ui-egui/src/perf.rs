@@ -29,6 +29,11 @@ pub fn stats(app: &FilmcraftApp) -> Value {
     frames["workers"] = json!(app.frames.workers());
     frames["queued"] = json!(app.frames.queue_len());
     frames["renderCostMs"] = json!(app.frames.render_cost() * 1e3);
+    // a throughput-bound source (camera RAW) while one plays: its rate, latency and the plan
+    let fps = app.session.sequence_rate().as_f64();
+    let (lead, stride) = app.frames.plan_for(fps);
+    frames["plan"] = json!({"lead": lead, "stride": stride});
+    frames["source"] = app.frames.source_rate().map_or(Value::Null, |m| json!({"rate": m.rate, "latencyMs": m.latency * 1e3}));
     frames["cache"] = json!({"images": images, "imageMB": image_bytes as f64 / 1e6, "plans": plans, "planMB": plan_bytes as f64 / 1e6});
     v["frames"] = frames;
     v["gpu"] = app.gpu.as_ref().map_or(Value::Null, |g| {
