@@ -21,7 +21,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 use filmcraft_frame::{AudioBuffer, VideoFrame};
 use filmcraft_media::generators::GeneratorSource;
-use filmcraft_media::{FrameRequest, MediaError, MediaInfo, MediaSource, Opener, SharedSource};
+use filmcraft_media::{FrameRequest, MediaError, MediaInfo, MediaSource, Opener, RawDevelop, SharedSource};
 use filmcraft_project::{ItemId, MediaClip, MediaRef, Project};
 use filmcraft_render::offline::OfflineReason;
 
@@ -86,14 +86,49 @@ impl Default for MediaPool {
 /// MP3 and other byte-opened formats, or an unsupported container).
 pub const PROBE_WHOLE_FILE_MAX: u64 = 64 * 1024 * 1024;
 
+/// Whether a clip is camera RAW with development settings (today: R3D NE through the RED SDK).
+pub(crate) fn is_camera_raw(m: &MediaClip) -> bool {
+    m.info.video.as_ref().is_some_and(|v| v.codec == "R3D NE") || matches!(&m.media, MediaRef::File { path } if filmcraft_codecs::r3d::is_r3d(path))
+}
+
+/// The development settings a camera RAW clip decodes with: its own or, under Decode Using ▸
+/// Project (or with none of its own), the project's Camera RAW settings `camera_raw`
+/// ([`RawDevelop::effective`]). Decode Using itself is left at Clip: the two develop the same
+/// picture. None for media that is not camera RAW.
+pub fn develop_of(camera_raw: &RawDevelop, m: &MediaClip) -> Option<RawDevelop> {
+    is_camera_raw(m).then(|| RawDevelop { decode_using: filmcraft_media::DecodeUsing::Clip, ..RawDevelop::effective(camera_raw, m.interpret.develop.as_ref()) })
+}
+
 /// Cache key of a media clip's full-resolution reference ("" matches anything: sources inserted
 /// without a key). A generator's key holds its parameters, so a Color Matte whose color changes
-/// (or comes back with undo) is generated again.
-pub fn media_key(m: &MediaClip) -> String {
+/// (or comes back with undo) is generated again. A camera RAW file's key carries the development
+/// settings it decodes with ([`develop_of`], under the project's Camera RAW settings
+/// `camera_raw`) when they are not the default, so a change reaches the open decoder
+/// ([`MediaPool::resolve`] hands it the new settings rather than matching the stale key).
+pub fn media_key(m: &MediaClip, camera_raw: &RawDevelop) -> String {
     match &m.media {
         MediaRef::File { path } if m.offline => format!("offline:{path}"),
-        MediaRef::File { path } => format!("file:{path}"),
+        MediaRef::File { path } => match develop_of(camera_raw, m).filter(|d| *d != RawDevelop::default()) {
+            Some(d) => format!("file:{path}|develop:{}", d.key()),
+            None => format!("file:{path}"),
+        },
         MediaRef::Generator(g) => format!("generator:{g:?}"),
+    }
+}
+
+/// The file part of a media key: the key without its development settings.
+fn key_file(key: &str) -> &str {
+    key.split("|develop:").next().unwrap_or(key)
+}
+
+/// Hand the development settings a clip decodes with ([`develop_of`]) to an open source. A source
+/// without such settings (every non-RAW decoder) is left alone; a RAW decoder that refuses them
+/// logs why and keeps decoding as it did.
+fn apply_develop(src: &SharedSource, m: &MediaClip, camera_raw: &RawDevelop) {
+    let Some(develop) = develop_of(camera_raw, m) else { return };
+    match src.set_develop(&develop) {
+        Ok(()) | Err(MediaError::Unsupported(_)) => {}
+        Err(e) => log::warn!("source settings not applied: {}: {e}", m.info.name),
     }
 }
 
@@ -324,11 +359,22 @@ impl MediaPool {
         {
             return Some(s);
         }
-        let key = media_key(m);
-        if let Some((k, s)) = self.sources.read().unwrap_or_else(|e| e.into_inner()).get(&item)
-            && (k.is_empty() || *k == key)
-        {
-            return Some(s.clone());
+        let key = media_key(m, &p.settings.camera_raw);
+        let cached = self.sources.read().unwrap_or_else(|e| e.into_inner()).get(&item).cloned();
+        if let Some((k, s)) = cached {
+            if k.is_empty() || k == key {
+                return Some(s);
+            }
+            // The same file with other Source Settings: the open decoder takes them. A second
+            // decoder process (and its GPU memory) is never started for a setting change.
+            if !k.is_empty() && key_file(&k) == key_file(&key) && key_file(&key).starts_with("file:") {
+                apply_develop(&s, m, &p.settings.camera_raw);
+                let mut sources = self.sources.write().unwrap_or_else(|e| e.into_inner());
+                if sources.get(&item).is_some_and(|(_, cur)| Arc::ptr_eq(cur, &s)) {
+                    sources.insert(item, (key, s.clone()));
+                }
+                return Some(s);
+            }
         }
         // One open per item at a time: the frame workers all miss together at start-up, and a
         // source whose decoder costs a process or GPU memory must not be opened six times.
@@ -355,6 +401,9 @@ impl MediaPool {
             }) {
                 Ok(s) => {
                     self.offline.write().unwrap_or_else(|e| e.into_inner()).remove(&item);
+                    if develop_of(&p.settings.camera_raw, m).is_some_and(|d| d != RawDevelop::default()) {
+                        apply_develop(&s, m, &p.settings.camera_raw);
+                    }
                     self.unsupported_as_slate(item, path, s)
                 }
                 Err(_) if filmcraft_media::pending::is_set() => {
@@ -550,6 +599,18 @@ impl MediaSource for UnsupportedAsSlate {
     fn frame_delivery(&self) -> filmcraft_media::FrameDelivery {
         self.inner.frame_delivery()
     }
+    fn set_develop(&self, develop: &RawDevelop) -> filmcraft_media::Result<()> {
+        self.inner.set_develop(develop)
+    }
+    fn raw_as_shot(&self) -> Option<filmcraft_media::RawAsShot> {
+        self.inner.raw_as_shot()
+    }
+    fn raw_clip_info(&self) -> Option<filmcraft_media::RawClipInfo> {
+        self.inner.raw_clip_info()
+    }
+    fn write_raw_sidecar(&self, develop: &RawDevelop) -> filmcraft_media::Result<String> {
+        self.inner.write_raw_sidecar(develop)
+    }
     fn video_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
         match self.inner.video_frame(req) {
             Err(MediaError::Unsupported(why)) => {
@@ -612,6 +673,18 @@ impl MediaSource for DamagedAsSlate {
     }
     fn frame_delivery(&self) -> filmcraft_media::FrameDelivery {
         self.inner.frame_delivery()
+    }
+    fn set_develop(&self, develop: &RawDevelop) -> filmcraft_media::Result<()> {
+        self.inner.set_develop(develop)
+    }
+    fn raw_as_shot(&self) -> Option<filmcraft_media::RawAsShot> {
+        self.inner.raw_as_shot()
+    }
+    fn raw_clip_info(&self) -> Option<filmcraft_media::RawClipInfo> {
+        self.inner.raw_clip_info()
+    }
+    fn write_raw_sidecar(&self, develop: &RawDevelop) -> filmcraft_media::Result<String> {
+        self.inner.write_raw_sidecar(develop)
     }
     fn video_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
         let r = self.inner.video_frame(req);
@@ -747,6 +820,106 @@ mod tests {
             assert!(!session.is_enabled("file.mediaProperties"));
             assert!(session.execute("transcript.generate", serde_json::json!({"items":[a.0]})).is_err());
         }
+    }
+
+    /// A stand-in RAW decoder: records the development settings it is given.
+    struct Developable {
+        info: MediaInfo,
+        develops: Mutex<Vec<RawDevelop>>,
+    }
+    impl MediaSource for Developable {
+        fn info(&self) -> &MediaInfo {
+            &self.info
+        }
+        fn video_frame(&self, _: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
+            Err(MediaError::NoStream("video"))
+        }
+        fn audio(&self, _: i64, _: usize, _: u32) -> filmcraft_media::Result<AudioBuffer> {
+            Err(MediaError::NoStream("audio"))
+        }
+        fn set_develop(&self, develop: &RawDevelop) -> filmcraft_media::Result<()> {
+            self.develops.lock().unwrap().push(*develop);
+            Ok(())
+        }
+    }
+
+    /// Clip ▸ Source Settings… reach the open RAW decoder through the pool: a change hands the new
+    /// settings to the cached source instead of opening a second decoder, and a source without
+    /// such settings is left alone.
+    #[test]
+    fn source_settings_reach_the_open_source_without_reopening() {
+        use filmcraft_media::{RawGamma, RawToneMap};
+        let mut project = Project::new("raw");
+        // a project from before Camera RAW settings: its clips develop scene-linear Rec. 709
+        project.settings.camera_raw = RawDevelop::default();
+        let info = MediaInfo {
+            name: "DSC_0001.R3D".into(),
+            kind: filmcraft_media::MediaKind::Movie,
+            duration: filmcraft_time::Tick(filmcraft_time::TICKS_PER_SECOND),
+            video: Some(filmcraft_media::VideoStreamInfo {
+                width: 16,
+                height: 9,
+                frame_rate: filmcraft_time::FrameRate::FPS_24,
+                par: (1, 1),
+                codec: "R3D NE".into(),
+                pixel_format: String::new(),
+                color: filmcraft_color::ColorInfo::SRGB_FULL,
+                has_alpha: false,
+                bitrate: None,
+                hdr: None,
+            }),
+            audio_streams: vec![],
+            container: "R3D NE".into(),
+            start_timecode: None,
+            file_size: None,
+        };
+        let clip = MediaClip {
+            media: MediaRef::File { path: "/footage/DSC_0001.R3D".into() },
+            info: info.clone(),
+            interpret: Default::default(),
+            mark_in: None,
+            mark_out: None,
+            markers: vec![],
+            offline: false,
+            proxy: None,
+            identity: None,
+        };
+        let id = project.add_item("DSC_0001.R3D", filmcraft_project::Label::Iris, ItemKind::Media(clip), None);
+        let pool = MediaPool::default();
+        let raw = Arc::new(Developable { info, develops: Mutex::default() });
+        pool.insert_file(id, "/footage/DSC_0001.R3D", raw.clone());
+        let develops = |raw: &Developable| raw.develops.lock().unwrap().clone();
+        // default settings: the cached source is used as it is
+        assert!(pool.source_for(&project, id, &crate::FsServices).is_some());
+        assert_eq!(develops(&raw), Vec::<RawDevelop>::new());
+        let set = |project: &mut Project, d: Option<RawDevelop>| {
+            if let Some(ItemKind::Media(m)) = project.item_mut(id).map(|i| &mut i.kind) {
+                m.interpret.develop = d;
+            }
+        };
+        let rec709 = RawDevelop { gamma: RawGamma::Bt1886, tone_map: RawToneMap::Medium, ..Default::default() };
+        set(&mut project, Some(rec709));
+        assert!(pool.source_for(&project, id, &crate::FsServices).is_some());
+        assert_eq!(develops(&raw), vec![rec709], "the open source took the new settings");
+        assert_eq!(pool.open_sources(), 1, "no second decoder");
+        // the same settings again: nothing to do
+        assert!(pool.source_for(&project, id, &crate::FsServices).is_some());
+        assert_eq!(develops(&raw).len(), 1);
+        // back to the default: the source is told so
+        set(&mut project, None);
+        assert!(pool.source_for(&project, id, &crate::FsServices).is_some());
+        assert_eq!(develops(&raw), vec![rec709, RawDevelop::default()]);
+        assert_eq!(media_key(project.item(id).unwrap().as_media().unwrap(), &project.settings.camera_raw), "file:/footage/DSC_0001.R3D");
+        set(&mut project, Some(rec709));
+        assert_eq!(
+            media_key(project.item(id).unwrap().as_media().unwrap(), &project.settings.camera_raw),
+            "file:/footage/DSC_0001.R3D|develop:rec709/bt1886/medium/clip"
+        );
+        assert_eq!(key_file("file:/a.R3D|develop:rec709/bt1886/medium/clip"), "file:/a.R3D");
+        // a source without development settings answers Unsupported and is left alone
+        let plain = Arc::new(SlateSource::new(raw.info.clone(), "plain", OfflineReason::Missing));
+        assert!(matches!(plain.set_develop(&rec709), Err(MediaError::Unsupported(_))));
+        apply_develop(&(plain as SharedSource), project.item(id).unwrap().as_media().unwrap(), &project.settings.camera_raw);
     }
 
     #[test]

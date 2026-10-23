@@ -1292,7 +1292,7 @@ impl FilmcraftApp {
             Some(filmcraft_project::ItemKind::Media(m)) => {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
-                filmcraft_engine::media_pool::media_key(m).hash(&mut h);
+                filmcraft_engine::media_pool::media_key(m, &p.settings.camera_raw).hash(&mut h);
                 (m.proxy.is_some() && self.session.media.use_proxies()).hash(&mut h);
                 h.finish()
             }
