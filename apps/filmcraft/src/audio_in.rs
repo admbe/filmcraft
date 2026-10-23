@@ -51,7 +51,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn report_error(error: &Mutex<Option<String>>, message: String) {
     let mut error = lock(error);
     if error.is_none() {
-        eprintln!("filmcraft: audio input error: {message}");
+        log::warn!("audio input error: {message}");
         *error = Some(message);
     }
 }
