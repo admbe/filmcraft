@@ -249,7 +249,8 @@ pub fn prepare_frame(f: &VideoFrame) -> Option<Prepared> {
         PixelData::Yuv16 { planes, bits, alpha, .. } => {
             Some(Prepared { planes: planes.iter().chain(alpha.as_ref()).map(|p| codes_to_f16_bytes(p, *bits)).collect() })
         }
-        PixelData::Rgba8(_) | PixelData::Yuv8 { .. } => None,
+        // halves are the texel layout already
+        PixelData::Rgba8(_) | PixelData::RgbaF16(_) | PixelData::Yuv8 { .. } => None,
     }
 }
 
@@ -482,6 +483,7 @@ impl GpuCompositor {
         let id = match &f.data {
             PixelData::Rgba8(d) => Arc::as_ptr(d) as *const u8 as usize,
             PixelData::RgbaF32(d) => Arc::as_ptr(d) as *const u8 as usize,
+            PixelData::RgbaF16(d) => Arc::as_ptr(d) as *const u8 as usize,
             PixelData::Yuv8 { planes, .. } => Arc::as_ptr(&planes[0]) as *const u8 as usize,
             PixelData::Yuv16 { planes, .. } => Arc::as_ptr(&planes[0]) as *const u8 as usize,
         };
@@ -517,6 +519,18 @@ impl GpuCompositor {
                     }
                 };
                 let v = self.plane_texture(w, h, wgpu::TextureFormat::Rgba16Float, half, 8);
+                Uploaded {
+                    views: [v, dummy(), dummy(), dummy()],
+                    kind: 1,
+                    code_scale: 1.0,
+                    alpha_scale: 0.0,
+                    chroma: (w, h),
+                    last_used: self.clock,
+                    _pixels: f.data.clone(),
+                }
+            }
+            PixelData::RgbaF16(d) => {
+                let v = self.plane_texture(w, h, wgpu::TextureFormat::Rgba16Float, d, 8);
                 Uploaded {
                     views: [v, dummy(), dummy(), dummy()],
                     kind: 1,
@@ -581,7 +595,10 @@ impl GpuCompositor {
             let mut v: Vec<(u64, (usize, u32, u32))> = self.uploads.iter().map(|(k, u)| (u.last_used, *k)).collect();
             v.sort_unstable();
             for (_, k) in v.into_iter().take(self.uploads.len() - 24) {
-                self.uploads.remove(&k);
+                // the last holder of a decoded frame's planes hands them back to the pool
+                if let Some(up) = self.uploads.remove(&k) {
+                    filmcraft_frame::pool::recycle_pixels(up._pixels);
+                }
             }
         }
         key
