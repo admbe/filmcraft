@@ -1121,8 +1121,9 @@ fn request_sequence_peaks(app: &mut FilmcraftApp, item: ItemId) -> Option<Arc<Ve
     have
 }
 
-/// Min/max peaks (one per 256 samples at 48 kHz) of audio stream `stream` of `src`, `dur` long.
-fn source_peaks(src: &dyn filmcraft_media::MediaSource, stream: usize, dur: Tick) -> Vec<(f32, f32)> {
+/// Min/max peaks (one per 256 samples at 48 kHz) of audio stream `stream` of `src`, `dur` long,
+/// and whether the whole stream was read (a read error ends the peaks early).
+fn source_peaks(src: &dyn filmcraft_media::MediaSource, stream: usize, dur: Tick) -> (Vec<(f32, f32)>, bool) {
     let sr = 48_000u32;
     let total = dur.to_units_floor(sr as i64).max(0) as usize;
     let mut out = Vec::with_capacity(total / 256 + 1);
@@ -1138,11 +1139,11 @@ fn source_peaks(src: &dyn filmcraft_media::MediaSource, stream: usize, dur: Tick
                     out.push((lo, hi));
                 }
             }
-            Err(_) => break,
+            Err(_) => return (out, false),
         }
         s += n;
     }
-    out
+    (out, true)
 }
 
 /// Waveform peaks of audio stream `stream` of `item` (a clip's `audio_stream`).
@@ -1167,12 +1168,23 @@ pub(crate) fn request_peaks(app: &mut FilmcraftApp, item: ItemId, stream: usize)
     // a decoder, and a timeline zoomed out over a hundred clips asked for every one of them in one
     // frame (in a field report, 80 probes on the UI thread, the window frozen for seconds).
     let provider = app.session.media.provider(app.session.project.clone(), app.session.services.clone());
+    // Settings ▸ Media Cache: the peaks of a file read once are kept, so a project opened again
+    // draws its waveforms at once (a card of 109 clips took 4.4 s to read again)
+    let cached_at = app.session.media_cache_dir().zip(media_file(app, item)).map(|(dir, file)| (dir, file, stream));
     let run = move || {
         let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             use filmcraft_render::SourceProvider;
+            let cache = cached_at.as_ref().and_then(|(dir, file, stream)| peak_cache::path_for(dir, file, *stream));
+            if let Some(peaks) = cache.as_deref().and_then(peak_cache::read) {
+                return Some(peaks);
+            }
             let src = provider.source(item)?;
             let dur = src.info().duration;
-            Some(source_peaks(&*src, stream, dur))
+            let (peaks, complete) = source_peaks(&*src, stream, dur);
+            if complete && let Some(path) = &cache {
+                peak_cache::write(path, &peaks);
+            }
+            Some(peaks)
         }));
         // No source (or a failure): leave it unpending so a later frame asks again.
         if let Ok(Some(out)) = out {
@@ -1182,6 +1194,141 @@ pub(crate) fn request_peaks(app: &mut FilmcraftApp, item: ItemId, stream: usize)
     };
     waveforms::submit(Box::new(run));
     None
+}
+
+/// The file behind `item` (followed as the media pool follows it), when it is file media.
+fn media_file(app: &FilmcraftApp, item: ItemId) -> Option<String> {
+    let it = app.session.project.item(item)?;
+    let m = it.as_media()?;
+    let filmcraft_project::MediaRef::File { path } = &m.media else { return None };
+    app.session.media.follow(path).ok()
+}
+
+/// Waveform peaks kept in the media cache folder (`waveforms/<key>.peaks`). The key is the file's
+/// path, size, modification time and audio stream, so a file that changes gets new peaks; a cache
+/// file that does not read back exactly (truncated, foreign, hostile) is ignored and replaced.
+pub(crate) mod peak_cache {
+    use std::path::{Path, PathBuf};
+
+    const MAGIC: &[u8; 8] = b"FCPEAK01";
+    /// Most peaks a cache file may hold (one per 256 samples at 48 kHz: about 97 hours).
+    const MAX_PEAKS: usize = 64 << 20;
+
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+    }
+
+    /// Where the peaks of `stream` of `file` live under `dir`, or `None` when the file cannot be
+    /// looked at.
+    pub fn path_for(dir: &Path, file: &str, stream: usize) -> Option<PathBuf> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (dir, file, stream);
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let meta = std::fs::metadata(file).ok()?;
+            let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+            let key = format!("{file}\n{}\n{modified}\n{stream}", meta.len());
+            Some(dir.join("waveforms").join(format!("{:016x}.peaks", fnv1a(key.as_bytes()))))
+        }
+    }
+
+    /// The peaks stored at `path`, if the file is a whole, well-formed cache file.
+    pub fn read(path: &Path) -> Option<Vec<(f32, f32)>> {
+        let bytes = std::fs::read(path).ok()?;
+        decode(&bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Vec<(f32, f32)>> {
+        let rest = bytes.strip_prefix(MAGIC)?;
+        let count = usize::try_from(u64::from_le_bytes(rest.get(..8)?.try_into().ok()?)).ok()?;
+        let body = rest.get(8..)?;
+        if count > MAX_PEAKS || body.len() != count.checked_mul(8)? {
+            return None;
+        }
+        let peaks: Vec<(f32, f32)> =
+            body.as_chunks::<8>().0.iter().map(|c| (f32::from_le_bytes([c[0], c[1], c[2], c[3]]), f32::from_le_bytes([c[4], c[5], c[6], c[7]]))).collect();
+        peaks.iter().all(|(lo, hi)| lo.is_finite() && hi.is_finite() && lo <= hi).then_some(peaks)
+    }
+
+    fn encode(peaks: &[(f32, f32)]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16 + peaks.len() * 8);
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&(peaks.len() as u64).to_le_bytes());
+        for (lo, hi) in peaks {
+            out.extend_from_slice(&lo.to_le_bytes());
+            out.extend_from_slice(&hi.to_le_bytes());
+        }
+        out
+    }
+
+    /// Store `peaks` at `path` (written aside, then renamed into place: a reader never sees half
+    /// a file). Best effort: a cache that cannot be written only means reading the audio again.
+    pub fn write(path: &Path, peaks: &[(f32, f32)]) {
+        if peaks.len() > MAX_PEAKS {
+            return;
+        }
+        let Some(dir) = path.parent() else { return };
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        let written = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&tmp, encode(peaks))).and_then(|()| std::fs::rename(&tmp, path));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            log::debug!("waveform cache not written ({}): {e}", path.display());
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn peaks_round_trip_and_anything_else_reads_as_absent() {
+            let peaks = vec![(-0.5f32, 0.25f32), (0.0, 0.0), (-1.0, 1.0)];
+            let bytes = encode(&peaks);
+            assert_eq!(decode(&bytes), Some(peaks.clone()));
+            for end in 0..bytes.len() {
+                assert_eq!(decode(&bytes[..end]), None, "truncated at {end}");
+            }
+            let mut longer = bytes.clone();
+            longer.push(0);
+            assert_eq!(decode(&longer), None);
+            let mut wrong = bytes.clone();
+            wrong[0] = b'X';
+            assert_eq!(decode(&wrong), None);
+            let mut huge = bytes.clone();
+            huge[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+            assert_eq!(decode(&huge), None);
+            let mut nan = bytes.clone();
+            nan[16..20].copy_from_slice(&f32::NAN.to_le_bytes());
+            assert_eq!(decode(&nan), None);
+            let mut inverted = bytes;
+            inverted[16..20].copy_from_slice(&2.0f32.to_le_bytes());
+            assert_eq!(decode(&inverted), None, "a minimum above its maximum");
+            assert_eq!(decode(&encode(&[])), Some(vec![]));
+        }
+
+        #[test]
+        fn a_file_that_changes_gets_new_peaks_and_the_cache_survives_a_reread() {
+            let dir = std::env::temp_dir().join(format!("fc-peak-cache-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("clip.wav");
+            std::fs::write(&file, b"one").unwrap();
+            let file = file.to_string_lossy().into_owned();
+            let cache = dir.join("cache");
+            let first = path_for(&cache, &file, 0).unwrap();
+            assert_ne!(Some(first.clone()), path_for(&cache, &file, 1), "each stream has its own peaks");
+            assert_eq!(read(&first), None);
+            write(&first, &[(-0.1, 0.1)]);
+            assert_eq!(read(&first), Some(vec![(-0.1, 0.1)]));
+            std::fs::write(&file, b"a longer file").unwrap();
+            assert_ne!(path_for(&cache, &file, 0), Some(first), "a changed file is a new key");
+            assert_eq!(path_for(&cache, &dir.join("gone.wav").to_string_lossy(), 0), None);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }
 
 /// Waveform work off the UI thread: a queue served by [`waveforms::THREADS`] named threads. Each
@@ -3252,12 +3399,13 @@ mod trim_preview_tests {
             file_size: None,
         };
         let src = TwoStreams(info);
-        let first = source_peaks(&src, 0, Tick(TICKS_PER_SECOND));
-        let second = source_peaks(&src, 1, Tick(TICKS_PER_SECOND));
+        let (first, whole) = source_peaks(&src, 0, Tick(TICKS_PER_SECOND));
+        assert!(whole, "stream 0 reads to its end");
+        let (second, _) = source_peaks(&src, 1, Tick(TICKS_PER_SECOND));
         assert!(!first.is_empty() && first.len() == second.len());
         assert!(first.iter().all(|&(_, hi)| (hi - 0.1).abs() < 1e-6), "stream 0 is the quiet one");
         assert!(second.iter().all(|&(_, hi)| (hi - 0.5).abs() < 1e-6), "stream 1 is its own audio, not stream 0 again");
-        assert!(source_peaks(&src, 2, Tick(TICKS_PER_SECOND)).is_empty(), "a missing stream has no peaks");
+        assert!(source_peaks(&src, 2, Tick(TICKS_PER_SECOND)).0.is_empty(), "a missing stream has no peaks");
     }
 
     #[test]
@@ -3601,5 +3749,48 @@ mod waveform_pool_tests {
         }
         assert!(request_peaks(&mut app, item, 0).is_some(), "the waveform arrives from the pool");
         assert!(app.session.media.cached(item).is_some(), "and the pool opened the source");
+    }
+
+    fn wait_peaks(app: &mut FilmcraftApp, item: ItemId) -> Option<Arc<Vec<(f32, f32)>>> {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(p) = request_peaks(app, item, 0) {
+                return Some(p);
+            }
+            if started.elapsed() > Duration::from_secs(30) {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_project_opened_again_reads_its_waveforms_from_the_media_cache() {
+        // A field report: reopening a 109-clip project read every clip's audio again (4.4 s of
+        // audio decoding before the timeline had its waveforms).
+        let dir = std::env::temp_dir().join(format!("fc-waveform-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("tone.wav");
+        let samples: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        std::fs::write(&wav, filmcraft_media::wav::write_wav16(&samples, 1, 48_000)).unwrap();
+        let cache = dir.join("cache");
+        let mut s = filmcraft_engine::Session::default();
+        s.prefs.media_cache.location = cache.to_string_lossy().into_owned();
+        s.execute("file.import", serde_json::json!({ "paths": [wav.to_string_lossy()] })).unwrap();
+        let item = s.project.items.iter().find(|(_, i)| i.as_media().is_some()).map(|(id, _)| *id).expect("the WAV is in the project");
+        let mut app = FilmcraftApp::new(s);
+        app.session.media.remove(item);
+        let first = wait_peaks(&mut app, item).expect("peaks from the audio");
+        assert!(!first.is_empty());
+        let stored: Vec<_> = std::fs::read_dir(cache.join("waveforms")).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        assert_eq!(stored.len(), 1, "one cache file, no temporary left behind: {stored:?}");
+        // as for the project opened again: no peaks in memory, the source not open
+        app.tl.peaks.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        app.session.media.remove(item);
+        let again = wait_peaks(&mut app, item).expect("peaks from the cache");
+        assert_eq!(*again, *first);
+        assert!(app.session.media.cached(item).is_none(), "the cache answered without opening the file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
