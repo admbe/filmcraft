@@ -483,11 +483,59 @@ impl Preferences {
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        let mut writes = prefs_writes();
+        let generation = writes.entry(path.to_path_buf()).or_default();
+        *generation = generation.wrapping_add(1);
+        Self::write(path, &serde_json::to_vec_pretty(self).unwrap_or_default())
+    }
+
+    fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         if let Some(d) = path.parent() {
             fs::create_dir_all(d)?;
         }
-        filmcraft_format::atomic_write(path, &serde_json::to_vec_pretty(self).unwrap_or_default())
+        filmcraft_format::atomic_write(path, bytes)
     }
+
+    /// [`Self::save`] on a thread of its own, for a change nobody waits on (the recent projects
+    /// list on File ▸ Open): the write is synced to disk, which took 454 ms on a busy disk and
+    /// froze the window. A newer save, in the background or not, wins over this one. Failures
+    /// are logged. On the web it saves at once.
+    pub fn save_in_background(&self, path: &Path) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self.save(path);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let bytes = serde_json::to_vec_pretty(self).unwrap_or_default();
+            let path = path.to_path_buf();
+            let mine = {
+                let mut writes = prefs_writes();
+                let generation = writes.entry(path.clone()).or_default();
+                *generation = generation.wrapping_add(1);
+                *generation
+            };
+            let write = move || {
+                let writes = prefs_writes();
+                if writes.get(&path) != Some(&mine) {
+                    return; // a newer save of this file has been or is being written
+                }
+                if let Err(e) = Self::write(&path, &bytes) {
+                    log::warn!("preferences not saved ({}): {e}", path.display());
+                }
+            };
+            if let Err(e) = std::thread::Builder::new().name("filmcraft-prefs".into()).spawn(write) {
+                log::warn!("preferences not saved: {e}");
+            }
+        }
+    }
+}
+
+/// Counts the saves of each preferences file; held while one is written, so saves never
+/// interleave and a background save that a newer save of the same file overtook is skipped.
+fn prefs_writes() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, u64>> {
+    static WRITES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, u64>>> = std::sync::OnceLock::new();
+    WRITES.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A file with this name next to the executable makes the install portable: its data directory is

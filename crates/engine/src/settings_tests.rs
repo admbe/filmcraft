@@ -431,6 +431,49 @@ fn recent_projects_are_remembered() {
 }
 
 #[test]
+fn opening_a_project_saves_the_recent_list_meanwhile_and_a_newer_save_wins() {
+    // File ▸ Open wrote and synced the preferences on the UI thread (454 ms on a busy disk).
+    let dir = tmp_dir("prefs-recent-bg");
+    let prefs = dir.join("prefs.json");
+    let read = || crate::autosave::Preferences::load(&prefs).general.recent_projects;
+    let wait_for = |want: &[String]| {
+        for _ in 0..1000 {
+            if read() == want {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("preferences on disk are {:?}, not {want:?}", read());
+    };
+    let mut s = demo();
+    s.prefs_path = Some(prefs.clone());
+    let a = dir.join("a.fcproj").to_string_lossy().into_owned();
+    s.execute("file.saveAs", json!({"path": a})).unwrap();
+    s.prefs.general.recent_projects.clear();
+    s.execute("file.open", json!({"path": a})).unwrap();
+    assert_eq!(s.prefs.general.recent_projects, std::slice::from_ref(&a), "in memory at once");
+    wait_for(std::slice::from_ref(&a));
+    // a save of another preferences file does not count as overtaking this one
+    let other = dir.join("other.json");
+    s.prefs.general.recent_projects = vec!["mine".into()];
+    s.prefs.save_in_background(&prefs);
+    s.prefs.save(&other).unwrap();
+    wait_for(&["mine".to_string()]);
+    // a background save overtaken by a newer synchronous one never lands after it
+    for round in 0..20 {
+        let mut old = s.prefs.clone();
+        old.general.recent_projects = vec![format!("old-{round}")];
+        old.save_in_background(&prefs);
+        let mut new = s.prefs.clone();
+        new.general.recent_projects = vec![format!("new-{round}")];
+        new.save(&prefs).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_eq!(read(), [format!("new-{round}")], "round {round}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn media_cache_location_policy_and_clean() {
     let dir = tmp_dir("prefs-cache");
     let mut s = Session::default();
