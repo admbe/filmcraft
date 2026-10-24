@@ -717,6 +717,8 @@ impl Session {
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        // from here on the caller waits (settling trim playback and checking named targets count)
+        let started = web_time::Instant::now();
         if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
             self.settle_trim_playback(id);
         }
@@ -724,11 +726,16 @@ impl Session {
             let e = EngineError::Disabled(id.to_string(), why);
             if self.exec_depth == 0 {
                 self.log.push(panels::Level::Warning, id, e.to_string());
+                let r = Err(e);
+                // a disabled command is logged only when finding that out was slow
+                if started.elapsed().as_millis() >= SLOW_COMMAND_MS {
+                    log_command(id, spec.journal, &params, &r, started.elapsed());
+                }
+                return r;
             }
             return Err(e);
         }
         self.exec_depth += 1;
-        let started = web_time::Instant::now();
         // Last-resort guard: a panic in a command (a bug that escaped the never-crash rules)
         // becomes an error for the caller (UI, CLI, control channel, MCP) instead of taking the
         // session and its unsaved project down. The panic hook has logged where it happened.

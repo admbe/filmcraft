@@ -414,9 +414,6 @@ pub fn font_families() -> Vec<FontFamily> {
     vec![FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name("semibold".into()), FontFamily::Name("medium".into())]
 }
 
-/// Install the Latin UI fonts, Chinese fallback (craft-fonts or an installed face), Japanese
-/// craft-fonts, Arabic and Hebrew fallbacks (craft-fonts or installed faces, [`crate::rtl`]) and
-/// egui visuals. Document names keep their glyphs in every interface language.
 static SYSTEM_FONTS_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Scan the installed fonts for the fallback faces (Chinese, Korean, right-to-left scripts) on a
@@ -431,10 +428,7 @@ pub fn warm_system_fonts() {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let spawned = std::thread::Builder::new().name("filmcraft-fonts".into()).spawn(|| {
-                let _ = std::panic::catch_unwind(|| {
-                    crate::cjk::warm_up();
-                    crate::rtl::warm_up();
-                });
+                run_font_scans(&[("Chinese and Korean", crate::cjk::warm_up), ("right-to-left", crate::rtl::warm_up)]);
                 SYSTEM_FONTS_DONE.store(true, std::sync::atomic::Ordering::Release);
             });
             if spawned.is_err() {
@@ -444,11 +438,29 @@ pub fn warm_system_fonts() {
     });
 }
 
+/// Run each font scan on its own, so one that fails still leaves the others' faces; a failure is
+/// logged. Returns how many failed. (Public for its test, which panics on purpose and so has a
+/// test binary of its own: `tests/font_scans.rs`.)
+#[doc(hidden)]
+pub fn run_font_scans(scans: &[(&str, fn())]) -> usize {
+    let mut failed = 0usize;
+    for (what, scan) in scans {
+        if std::panic::catch_unwind(*scan).is_err() {
+            failed = failed.saturating_add(1);
+            log::error!("the scan of the installed {what} fonts failed; the interface goes on without them");
+        }
+    }
+    failed
+}
+
 /// Whether [`warm_system_fonts`] has finished.
 pub fn system_fonts_done() -> bool {
     SYSTEM_FONTS_DONE.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// Install the Latin UI fonts, Chinese fallback (craft-fonts or an installed face), Japanese
+/// craft-fonts, Arabic and Hebrew fallbacks (craft-fonts or installed faces, [`crate::rtl`]) and
+/// egui visuals. Document names keep their glyphs in every interface language.
 pub fn install(ctx: &egui::Context, t: &Tokens) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("inter".into(), Arc::new(FontData::from_static(filmcraft_text::fonts::INTER_REGULAR)));

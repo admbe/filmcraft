@@ -33,6 +33,15 @@ pub struct UiTiming {
     /// The panels drawn this frame and how long each took ([`UiTiming::panel`]), so a slow frame
     /// names the panel it was in.
     panel_times: Vec<(&'static str, Duration)>,
+    /// All the time [`UiTiming::exclude`] has left out, so a panel that opened the modal leaves
+    /// it out too ([`UiTiming::panel_done`]).
+    excluded: Duration,
+}
+
+/// When a panel started drawing, for [`UiTiming::panel_done`].
+pub struct PanelStart {
+    at: Instant,
+    excluded: Duration,
 }
 
 impl UiTiming {
@@ -48,8 +57,21 @@ impl UiTiming {
         if let Some(t) = self.started.as_mut()
             && let Some(later) = t.checked_add(waited)
         {
-            *t = later.min(Instant::now());
+            let later = later.min(Instant::now());
+            self.excluded = self.excluded.saturating_add(later.saturating_duration_since(*t));
+            *t = later;
         }
+    }
+
+    /// A panel starts drawing.
+    pub fn panel_start(&self) -> PanelStart {
+        PanelStart { at: Instant::now(), excluded: self.excluded }
+    }
+
+    /// Panel `name`, started at `start`, is drawn: its time, less any modal it showed meanwhile.
+    pub fn panel_done(&mut self, name: &'static str, start: PanelStart) {
+        let waited = self.excluded.saturating_sub(start.excluded);
+        self.panel(name, start.at.elapsed().saturating_sub(waited));
     }
 
     /// Panel `name` took `took` to draw this frame (several of one name add up).
@@ -145,6 +167,20 @@ fn panel_breakdown(panels_ms: f64, by_panel: &[(&'static str, Duration)]) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_modal_a_panel_opened_is_left_out_of_its_time() {
+        // the frame left the wait out but the panel kept it, so the log named the panel as slow
+        let mut t = UiTiming::default();
+        t.begin();
+        let start = t.panel_start();
+        std::thread::sleep(Duration::from_millis(200));
+        t.exclude(Duration::from_millis(200));
+        t.panel_done("Project", start);
+        let (name, took) = t.panel_times[0];
+        assert_eq!(name, "Project");
+        assert!(took < Duration::from_millis(100), "{took:?}");
+    }
 
     #[test]
     fn long_frames_are_counted_by_threshold_and_the_longest_is_kept() {

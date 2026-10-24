@@ -474,6 +474,37 @@ fn opening_a_project_saves_the_recent_list_meanwhile_and_a_newer_save_wins() {
 }
 
 #[test]
+fn a_preferences_write_in_progress_holds_up_only_saves_of_its_own_file() {
+    // The background write held one lock for every preferences file while it wrote, so the UI
+    // thread waited on a slow disk to count its next save, of that file or any other.
+    let dir = tmp_dir("prefs-per-file");
+    let (busy, other) = (dir.join("busy.json"), dir.join("other.json"));
+    let file = crate::autosave::prefs_file(&busy);
+    let writing = file.writing.lock().unwrap();
+    let mut p = Preferences::default();
+    p.general.recent_projects = vec!["newest".into()];
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (b, o, q) = (busy.clone(), other.clone(), p.clone());
+    std::thread::spawn(move || {
+        q.save_in_background(&b);
+        q.save(&o).unwrap();
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10)).expect("scheduling a save and saving another file wait for nothing");
+    assert!(!busy.exists(), "the busy file's own save waits for the write in progress");
+    drop(writing);
+    for _ in 0..1000 {
+        if Preferences::load(&busy).general.recent_projects == p.general.recent_projects {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(Preferences::load(&busy).general.recent_projects, p.general.recent_projects);
+    assert_eq!(Preferences::load(&other).general.recent_projects, p.general.recent_projects);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn media_cache_location_policy_and_clean() {
     let dir = tmp_dir("prefs-cache");
     let mut s = Session::default();

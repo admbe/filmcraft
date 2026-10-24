@@ -22,6 +22,16 @@ fn frame_numbers(delay: Duration, calls: Arc<AtomicU64>) -> impl FnMut(i64, &mut
     }
 }
 
+/// Waits (a bounded time) until the mixing thread has put `n` blocks in the ring (the first one
+/// is mixed there, after `spawn` returns).
+fn wait_for_blocks(stats: &AudioStats, n: u64) {
+    let t0 = Instant::now();
+    while stats.blocks_mixed.load(Ordering::Acquire) < n {
+        assert!(t0.elapsed() < Duration::from_secs(10), "{n} blocks were never mixed");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Plays `callbacks` device periods, one every period on the wall clock as a device does, and
 /// returns the interleaved output.
 fn play(fill: &mut Box<dyn FnMut(&mut [f32], usize) + Send>, ch: usize, callbacks: usize) -> Vec<f32> {
@@ -43,7 +53,8 @@ fn play(fill: &mut Box<dyn FnMut(&mut [f32], usize) + Send>, ch: usize, callback
 fn plays_every_frame_in_order_from_the_start() {
     let stats = Arc::new(AudioStats::default());
     let mut fill = spawn(frame_numbers(Duration::ZERO, Arc::default()), 1000, SR, 2, stats.clone());
-    std::thread::sleep(Duration::from_millis(30));
+    // let the mixer fill its lead first, as a device's start-up gives it time to
+    wait_for_blocks(&stats, (LEAD_S * SR as f64) as u64 / BLOCK_FRAMES as u64 - 1);
     let out = play(&mut fill, 2, 60);
     for (p, f) in out.chunks(2).enumerate() {
         assert_eq!(f, [(1000 + p) as f32; 2], "frame {p}");
@@ -106,8 +117,8 @@ fn a_mixer_that_panics_leaves_silence_not_a_crash() {
         frame_numbers(Duration::ZERO, Arc::default())(cursor, buf, ch);
     };
     let mut fill = spawn(mix, 1, SR, 2, stats.clone());
-    // the first block is mixed on the mixing thread: give it the moment it takes
-    std::thread::sleep(Duration::from_millis(30));
+    // the first block is mixed on the mixing thread: wait for it, as a device's start-up does
+    wait_for_blocks(&stats, 1);
     let out = play(&mut fill, 2, 20);
     assert!(out.iter().all(|x| x.is_finite()));
     assert_eq!(out.get(..2), Some(&[1.0, 1.0][..]), "the block mixed before the panic plays");
@@ -119,8 +130,9 @@ fn a_device_with_other_channels_plays_the_channels_both_have() {
     for dev_ch in [1, 6, 10, 16] {
         let stats = Arc::new(AudioStats::default());
         let mut fill = spawn(frame_numbers(Duration::ZERO, Arc::default()), 1, SR, 2, stats.clone());
-        // let the mixer get ahead first, as a device would before its first callback
-        std::thread::sleep(Duration::from_millis(30));
+        // let the mixer get ahead first (the 4 callbacks play 2 blocks), as a device would before
+        // its first callback
+        wait_for_blocks(&stats, 2);
         let out = play(&mut fill, dev_ch, 4);
         for (p, f) in out.chunks(dev_ch).enumerate() {
             let want: Vec<f32> = (0..dev_ch).map(|c| if c < 2 { (1 + p) as f32 } else { 0.0 }).collect();

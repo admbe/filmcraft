@@ -74,9 +74,9 @@ pub fn eta_suffix(job: &serde_json::Value) -> String {
 }
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {
-    let started = web_time::Instant::now();
+    let started = app.ui_timing.panel_start();
     show_kind(app, ui, p, rect);
-    app.ui_timing.panel(p.title(), started.elapsed());
+    app.ui_timing.panel_done(p.title(), started);
 }
 
 fn show_kind(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {
