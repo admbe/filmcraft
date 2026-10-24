@@ -649,6 +649,9 @@ enum Msg {
     Prefs(AutoSavePrefs),
     AutoSaveNow(Sender<Result<PathBuf, String>>),
     Flush(Sender<()>),
+    /// Write any pending journal, then delete this folder (a recovered session's old journal:
+    /// ours must hold the recovered state before the old one goes).
+    FlushThenRemove(PathBuf),
     Stop,
 }
 
@@ -776,6 +779,14 @@ impl Persistence {
         let (tx, rx) = channel();
         if self.tx.send(Msg::Flush(tx)).is_ok() {
             let _ = rx.recv_timeout(Duration::from_secs(30));
+        }
+    }
+
+    /// Delete `dir` once any pending journal is written, without waiting for either (the
+    /// worker does them in order). File ▸ Recover waited for both on the UI thread (1.3 s).
+    pub fn remove_after_journal(&self, dir: PathBuf) {
+        if let Err(e) = self.tx.send(Msg::FlushThenRemove(dir)) {
+            log::warn!("auto-save worker stopped; the old journal stays: {e}");
         }
     }
 
@@ -950,6 +961,16 @@ impl Worker {
                         self.write_journal();
                     }
                     let _ = ack.send(());
+                }
+                Some(Msg::FlushThenRemove(dir)) => {
+                    if self.journal_due().is_some() {
+                        self.write_journal();
+                    }
+                    if let Err(e) = fs::remove_dir_all(&dir)
+                        && e.kind() != io::ErrorKind::NotFound
+                    {
+                        log::warn!("recovered session's old journal not removed ({}): {e}", dir.display());
+                    }
                 }
                 Some(Msg::Stop) => return,
                 None => {}

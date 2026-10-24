@@ -4440,13 +4440,13 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
         s.events.push(crate::Event::OpenSequence(seq));
     }
     crate::relink::on_open(s);
-    // Our own journal must hold the recovered state before the old one is deleted.
+    // Our own journal must hold the recovered state before the old one is deleted: the worker
+    // writes it, then deletes the old one, in that order, while the window goes on.
     s.sync_persistence();
     if let Some(per) = s.persistence.as_mut() {
-        per.flush();
         per.candidates.remove(idx);
+        per.remove_after_journal(c.dir.clone());
     }
-    crate::autosave::discard_candidate(&c).map_err(|e| EngineError::Other(e.to_string()))?;
     s.toast(format!("Recovered unsaved changes to {} from {saved_at}", c.meta.project_name));
     Ok(json!({"id": c.id, "name": c.meta.project_name, "path": c.meta.project_path, "savedAt": saved_at, "revision": c.meta.revision}))
 }

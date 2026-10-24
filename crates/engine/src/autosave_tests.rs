@@ -90,14 +90,20 @@ fn crash_recovery_end_to_end() {
     assert_eq!(list[0]["projectPath"], proj.as_str());
     assert_eq!(list[0]["cleanExit"], false);
     assert_eq!(list[0]["savedAt"].as_str().unwrap().len(), 19);
+    let old_dir = c.recovery_candidates()[0].dir.clone();
+    let t = std::time::Instant::now();
     c.execute("file.recover", json!({})).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_secs(1), "the journal is written meanwhile, not waited for: {:?}", t.elapsed());
     assert_eq!(*c.project, edited);
     assert!(c.is_dirty(), "recovered changes are unsaved");
     assert_eq!(c.path.as_deref(), Some(proj.as_str()));
     assert!(c.recovery_candidates().is_empty());
     assert!(!c.is_enabled("file.recover"));
-    // The recovered state is already in C's own journal (a crash now loses nothing).
-    assert_eq!(journaled(&mut c), c.revision);
+    // The recovered state goes into C's own journal (a crash then loses nothing), and only then
+    // does the old session's journal go.
+    let rev = c.revision;
+    wait_for("the recovered state journaled", || journaled(&mut c) == rev);
+    wait_for("the old journal removed", || !old_dir.exists());
     c.execute("file.save", json!({})).unwrap();
     wait_for("journal cleared", || {
         c.poll_persistence();

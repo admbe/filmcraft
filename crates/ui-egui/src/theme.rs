@@ -417,6 +417,38 @@ pub fn font_families() -> Vec<FontFamily> {
 /// Install the Latin UI fonts, Chinese fallback (craft-fonts or an installed face), Japanese
 /// craft-fonts, Arabic and Hebrew fallbacks (craft-fonts or installed faces, [`crate::rtl`]) and
 /// egui visuals. Document names keep their glyphs in every interface language.
+static SYSTEM_FONTS_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Scan the installed fonts for the fallback faces (Chinese, Korean, right-to-left scripts) on a
+/// thread of its own, once per process. The scan reads and parses every system font: on Windows
+/// it was ~1.7 s of the first frame in a field report, the window blank meanwhile. [`install`] adds
+/// the faces found so far; once [`system_fonts_done`] the app installs the fonts again.
+pub fn warm_system_fonts() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        #[cfg(target_arch = "wasm32")]
+        SYSTEM_FONTS_DONE.store(true, std::sync::atomic::Ordering::Release);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let spawned = std::thread::Builder::new().name("filmcraft-fonts".into()).spawn(|| {
+                let _ = std::panic::catch_unwind(|| {
+                    crate::cjk::warm_up();
+                    crate::rtl::warm_up();
+                });
+                SYSTEM_FONTS_DONE.store(true, std::sync::atomic::Ordering::Release);
+            });
+            if spawned.is_err() {
+                SYSTEM_FONTS_DONE.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    });
+}
+
+/// Whether [`warm_system_fonts`] has finished.
+pub fn system_fonts_done() -> bool {
+    SYSTEM_FONTS_DONE.load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub fn install(ctx: &egui::Context, t: &Tokens) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("inter".into(), Arc::new(FontData::from_static(filmcraft_text::fonts::INTER_REGULAR)));

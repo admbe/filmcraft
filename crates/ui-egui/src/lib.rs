@@ -348,6 +348,9 @@ pub struct FilmcraftApp {
     input_waiters: Vec<Sender<Value>>,
     next_token: u64,
     styled: bool,
+    /// The fonts were installed with the system fallback faces scanned at start-up
+    /// ([`theme::warm_system_fonts`]); until then they are installed without them.
+    system_fonts_installed: bool,
     /// A panic in the UI pass, shown in an error window until dismissed (see [`crash`]).
     pub ui_error: Option<String>,
     /// The window runs in a fallback graphics mode (set by the desktop host): a notice with a
@@ -549,6 +552,8 @@ impl FilmcraftApp {
 
 impl FilmcraftApp {
     pub fn new(mut session: Session) -> Self {
+        // the system fallback fonts are scanned meanwhile, not on the first frame
+        theme::warm_system_fonts();
         session.shortcuts.register_external(menus::external_commands());
         let recovery = !session.recovery_candidates().is_empty();
         let frames = Arc::new(FrameServer::new(session.media.clone(), session.services.clone(), session.previews.clone(), FrameServer::default_workers()));
@@ -593,6 +598,7 @@ impl FilmcraftApp {
             input_waiters: Vec::new(),
             next_token: 1,
             styled: false,
+            system_fonts_installed: false,
             ui_error: None,
             panic_next_frame: false,
             quit_confirmed: false,
@@ -2157,6 +2163,11 @@ impl FilmcraftApp {
     fn logic_pass(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // a native file dialog's answer first, so the panels draw what it chose (#260)
         self.poll_native_dialog(ctx);
+        // the system fallback fonts have been scanned meanwhile: install the fonts again with them
+        if !self.system_fonts_installed && theme::system_fonts_done() {
+            self.system_fonts_installed = true;
+            self.styled = false;
+        }
         if !self.styled {
             theme::install(ctx, &self.tokens);
             // theme::install replaces the fonts: add the system Japanese font back (or fall back to
