@@ -413,6 +413,13 @@ fn convert_samples<T: cpal::Sample + cpal::FromSample<f32>>(input: &[f32], outpu
     }
 }
 
+impl Drop for CpalOut {
+    /// The app can exit without stopping the output: log what the audio threads left.
+    fn drop(&mut self) {
+        self.health.log_pending();
+    }
+}
+
 impl AudioOut for CpalOut {
     fn start(&mut self, fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
         self.stop();
