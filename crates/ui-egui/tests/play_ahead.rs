@@ -106,6 +106,47 @@ fn a_slow_first_block_plays_silence_then_sound_in_time() {
 }
 
 #[test]
+fn a_block_that_was_all_late_is_not_counted_as_mixed() {
+    // A first block mixed after the device had played more than a block of silence put nothing
+    // in the ring, yet counted as mixed: a wait for the first block went on to silence.
+    let stats = Arc::new(AudioStats::default());
+    let calls = Arc::new(AtomicU64::new(0));
+    let (go1, wait1) = std::sync::mpsc::channel::<()>();
+    let (go2, wait2) = std::sync::mpsc::channel::<()>();
+    let counted = calls.clone();
+    let mix = move |cursor: i64, buf: &mut [f32], ch: usize| {
+        match counted.fetch_add(1, Ordering::AcqRel) {
+            0 => drop(wait1.recv()),
+            1 => drop(wait2.recv()),
+            _ => {}
+        }
+        frame_numbers(Duration::ZERO, Arc::default())(cursor, buf, ch);
+    };
+    let mut fill = spawn(mix, 1, SR, 2, stats.clone());
+    let wait_calls = |n: u64| {
+        let t0 = Instant::now();
+        while calls.load(Ordering::Acquire) < n {
+            assert!(t0.elapsed() < Duration::from_secs(10), "the mixer was never called {n} times");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    // the first block is being mixed while the device plays two blocks of silence
+    wait_calls(1);
+    let mut buf = vec![f32::NAN; 2 * BLOCK_FRAMES * 2];
+    fill(&mut buf, 2);
+    assert!(buf.iter().all(|x| *x == 0.0));
+    go1.send(()).unwrap();
+    // the mixer has pushed the late block and is mixing the next one
+    wait_calls(2);
+    assert_eq!(stats.blocks_mixed.load(Ordering::Acquire), 0, "nothing of the late block is in the ring");
+    go2.send(()).unwrap();
+    wait_for_blocks(&stats, 1);
+    let mut buf = vec![f32::NAN; PERIOD * 2];
+    fill(&mut buf, 2);
+    assert!(buf.iter().all(|x| *x != 0.0), "a counted block has sound in the ring");
+}
+
+#[test]
 fn a_mixer_that_panics_leaves_silence_not_a_crash() {
     let stats = Arc::new(AudioStats::default());
     let mut first = true;

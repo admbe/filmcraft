@@ -35,8 +35,8 @@ pub struct AudioStats {
     /// Fewest frames left in the ring after a callback, once it first filled to the lead
     /// (`u64::MAX` until then).
     pub min_lead_frames: AtomicU64,
-    /// Blocks the mixing thread has put in the ring (the first one arrives after [`spawn`]
-    /// returns).
+    /// Blocks the mixing thread has put in the ring with sound still due (the first one arrives
+    /// after [`spawn`] returns; a block that was all late by the time it was mixed is not counted).
     pub blocks_mixed: AtomicU64,
 }
 
@@ -161,8 +161,9 @@ where
                 let drop = late.min(BLOCK_FRAMES);
                 cursor += (late - drop) as i64;
                 ring.push(block.get(drop * ch..).unwrap_or_default());
-                // (a stopped stream's last block does not count for the next one, which shares the stats)
-                if !stop.load(Ordering::Acquire) {
+                // (a block that was all late put nothing in the ring; a stopped stream's last block
+                // does not count for the next one, which shares the stats)
+                if drop < BLOCK_FRAMES && !stop.load(Ordering::Acquire) {
                     mixed.blocks_mixed.fetch_add(1, Ordering::Release);
                 }
             }
