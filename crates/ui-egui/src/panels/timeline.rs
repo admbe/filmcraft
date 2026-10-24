@@ -56,6 +56,8 @@ pub struct TlState {
     /// from, and the key worked out for the session revision last seen.
     seq_peak_keys: Arc<Mutex<HashMap<ItemId, u64>>>,
     seq_keys_seen: HashMap<ItemId, (u64, u64)>,
+    /// This app's waveform jobs (see [`waveforms::Pool`]).
+    pub(crate) waveforms: waveforms::Pool,
     /// Source peak of each cached peak list (keyed by the list's address), for the waveform
     /// display gain: scanning the whole source per clip per frame cost more than drawing.
     peak_max: HashMap<PeakKey, (usize, f32)>,
@@ -1117,7 +1119,7 @@ fn request_sequence_peaks(app: &mut FilmcraftApp, item: ItemId) -> Option<Arc<Ve
         }
         pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|i| *i != pkey);
     };
-    waveforms::submit(Box::new(run));
+    app.tl.waveforms.submit(Box::new(run));
     have
 }
 
@@ -1192,7 +1194,7 @@ pub(crate) fn request_peaks(app: &mut FilmcraftApp, item: ItemId, stream: usize)
         }
         pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|i| *i != pkey);
     };
-    waveforms::submit(Box::new(run));
+    app.tl.waveforms.submit(Box::new(run));
     None
 }
 
@@ -1332,51 +1334,99 @@ pub(crate) mod peak_cache {
     }
 }
 
-/// Waveform work off the UI thread: a queue served by [`waveforms::THREADS`] named threads. Each
-/// waveform used to get a thread of its own, and each one opens that clip's audio decoder: a
-/// timeline of 104 clips ran 104 threads and 104 decoders at once (a field report). Now at most
-/// this many clips are read at a time; the rest wait in order. On the web there are no threads: the job runs at once.
+/// Waveform work off the UI thread: each app has a queue served by [`waveforms::THREADS`] named
+/// threads. Each waveform used to get a thread of its own, and each one opens that clip's audio
+/// decoder: a timeline of 104 clips ran 104 threads and 104 decoders at once (a field report).
+/// Now at most this many clips are read at a time; the rest wait in order. The queue belongs to
+/// the app, not the process, so apps in one process (the tests) never wait on each other's
+/// waveforms. On the web there are no threads: the job runs at once.
 pub(crate) mod waveforms {
     use std::collections::VecDeque;
-    use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
+    use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
-    /// Waveforms computed at once.
+    /// Waveforms one app computes at once.
     pub const THREADS: usize = 2;
 
     type Job = Box<dyn FnOnce() + Send>;
 
+    #[derive(Default)]
+    struct State {
+        jobs: VecDeque<Job>,
+        /// Threads started so far (they start with the first jobs, up to [`THREADS`]).
+        #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+        threads: usize,
+        /// The pool was dropped: its threads end once they see this.
+        #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+        closed: bool,
+    }
+
+    #[derive(Default)]
     struct Queue {
-        jobs: Mutex<VecDeque<Job>>,
+        state: Mutex<State>,
         #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
         ready: Condvar,
     }
 
-    fn queue() -> &'static Queue {
-        static QUEUE: OnceLock<Queue> = OnceLock::new();
-        QUEUE.get_or_init(|| {
-            let q = Queue { jobs: Mutex::new(VecDeque::new()), ready: Condvar::new() };
-            #[cfg(not(target_arch = "wasm32"))]
-            for i in 0..THREADS {
-                let spawned = std::thread::Builder::new().name(format!("filmcraft-waveform-{i}")).spawn(serve);
-                if let Err(e) = spawned {
-                    log::warn!("waveform thread {i} not started: {e}");
-                }
+    /// One app's waveform queue. Its threads start with its first jobs and end when it is
+    /// dropped with the app; jobs still waiting then are dropped too (their results would go to
+    /// the dropped app's maps).
+    #[derive(Default)]
+    pub struct Pool {
+        queue: Arc<Queue>,
+    }
+
+    impl Pool {
+        /// Queue `job` (desktop) or run it now (web).
+        pub fn submit(&self, job: Job) {
+            #[cfg(target_arch = "wasm32")]
+            {
+                job();
             }
-            q
-        })
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut state = self.queue.state.lock().unwrap_or_else(PoisonError::into_inner);
+                state.jobs.push_back(job);
+                if state.threads < THREADS {
+                    let (i, queue) = (state.threads, self.queue.clone());
+                    match std::thread::Builder::new().name(format!("filmcraft-waveform-{i}")).spawn(move || serve(&queue)) {
+                        Ok(_) => state.threads += 1,
+                        Err(e) => log::warn!("waveform thread {i} not started: {e}"),
+                    }
+                }
+                drop(state);
+                self.queue.ready.notify_one();
+            }
+        }
+
+        /// Jobs waiting (not counting those running).
+        pub fn queued(&self) -> usize {
+            self.queue.state.lock().unwrap_or_else(PoisonError::into_inner).jobs.len()
+        }
+    }
+
+    impl Drop for Pool {
+        fn drop(&mut self) {
+            let mut state = self.queue.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.closed = true;
+            state.jobs.clear();
+            drop(state);
+            self.queue.ready.notify_all();
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn serve() {
-        let q = queue();
+    fn serve(queue: &Queue) {
         loop {
             let job = {
-                let mut jobs = q.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut state = queue.state.lock().unwrap_or_else(PoisonError::into_inner);
                 loop {
-                    if let Some(job) = jobs.pop_front() {
+                    if state.closed {
+                        return;
+                    }
+                    if let Some(job) = state.jobs.pop_front() {
                         break job;
                     }
-                    jobs = q.ready.wait(jobs).unwrap_or_else(PoisonError::into_inner);
+                    state = queue.ready.wait(state).unwrap_or_else(PoisonError::into_inner);
                 }
             };
             // a panicking waveform must not take a pool thread with it
@@ -1384,25 +1434,6 @@ pub(crate) mod waveforms {
                 log::warn!("a waveform job panicked; the waveform stays empty");
             }
         }
-    }
-
-    /// Queue `job` (desktop) or run it now (web).
-    pub fn submit(job: Job) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            job();
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let q = queue();
-            q.jobs.lock().unwrap_or_else(PoisonError::into_inner).push_back(job);
-            q.ready.notify_one();
-        }
-    }
-
-    /// Jobs waiting (not counting those running).
-    pub fn queued() -> usize {
-        queue().jobs.lock().unwrap_or_else(PoisonError::into_inner).len()
     }
 }
 
@@ -3687,14 +3718,14 @@ mod waveform_pool_tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// Occupy every waveform thread until the returned sender is dropped.
-    fn block_pool() -> mpsc::Sender<()> {
+    /// Occupy every thread of `pool` until the returned sender is dropped.
+    fn block_pool(pool: &waveforms::Pool) -> mpsc::Sender<()> {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
         let (started_tx, started_rx) = mpsc::channel();
         for _ in 0..waveforms::THREADS {
             let (rx, started) = (release_rx.clone(), started_tx.clone());
-            waveforms::submit(Box::new(move || {
+            pool.submit(Box::new(move || {
                 let _ = started.send(());
                 // wait for the release (the sender dropped), with a bound so a failure cannot hang
                 let _ = rx.lock().unwrap_or_else(|e| e.into_inner()).recv_timeout(Duration::from_secs(30));
@@ -3711,9 +3742,10 @@ mod waveform_pool_tests {
         // Regression: a thread per waveform, 104 at once for a 104-clip timeline.
         let (running, peak, done) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let n = 12;
+        let pool = waveforms::Pool::default();
         for _ in 0..n {
             let (running, peak, done) = (running.clone(), peak.clone(), done.clone());
-            waveforms::submit(Box::new(move || {
+            pool.submit(Box::new(move || {
                 let now = running.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(now, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(30));
@@ -3741,7 +3773,7 @@ mod waveform_pool_tests {
         // as for a project just opened: the clip's source is not open yet
         app.session.media.remove(item);
         assert!(app.session.media.cached(item).is_none());
-        let release = block_pool();
+        let release = block_pool(&app.tl.waveforms);
         assert!(request_peaks(&mut app, item, 0).is_none(), "nothing computed yet");
         assert!(app.session.media.cached(item).is_none(), "the source was opened by the caller, not the waveform thread");
         drop(release);
