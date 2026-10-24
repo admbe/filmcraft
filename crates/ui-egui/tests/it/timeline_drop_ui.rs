@@ -181,6 +181,31 @@ fn a_drop_while_another_is_importing_places_both() {
     assert_eq!(clip_counts(&h), (6, 1), "both drops are placed; status: {}", h.state().ui.status);
 }
 
+/// A drop whose import finished while the window was in Import mode (no Timeline drawn) was
+/// taken from the queue and cleared at the end of the frame: back in Edit mode the files were in
+/// the bin only. The drop now waits for the Timeline.
+#[test]
+fn a_drop_that_finishes_in_another_mode_is_placed_back_in_edit() {
+    let mut h = harness();
+    let at = point_on_row(&h, "timeline.track.V1.target");
+    pointer_to(&mut h, at);
+    h.input_mut().dropped_files.push(std::sync::Arc::new(OsFile(still("drop_other_mode.png"))));
+    step(&mut h);
+    h.input_mut().dropped_files.clear();
+    // the import finishes on a later frame: switch away first
+    h.state_mut().ui.mode = filmcraft_ui_egui::state::Mode::Import;
+    settle_imports(&mut h);
+    for _ in 0..4 {
+        step(&mut h);
+    }
+    assert_eq!(h.state().session.project.items.values().filter(|it| it.name == "drop_other_mode.png").count(), 1, "imported meanwhile");
+    assert_eq!(clip_counts(&h), (0, 0), "not placed while the Timeline is not shown");
+    h.state_mut().ui.mode = filmcraft_ui_egui::state::Mode::Edit;
+    step(&mut h);
+    step(&mut h);
+    assert_eq!(clip_counts(&h), (1, 0), "placed at the drop point back in Edit mode; status: {}", h.state().ui.status);
+}
+
 #[test]
 fn still_dropped_on_an_audio_row_goes_to_the_video_track_without_error() {
     // a video-only item over an audio row: the picture takes the matching video track, no error

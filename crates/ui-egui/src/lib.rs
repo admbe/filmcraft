@@ -370,8 +370,9 @@ pub struct FilmcraftApp {
     /// still running: its job, the drop point and the items the drop imported at once. When the
     /// import finishes those items and its own join [`Self::ready_drops`].
     drop_imports: Vec<(u64, egui::Pos2, Vec<filmcraft_engine::project::ItemId>)>,
-    /// Dropped files imported and waiting for the Timeline, oldest first: one a frame becomes
-    /// [`Self::pending_timeline_drop`], so drops that finish in the same frame are all placed.
+    /// Dropped files imported and waiting for the Timeline, oldest first: one a frame in Edit mode
+    /// becomes [`Self::pending_timeline_drop`], so drops that finish in the same frame, or while
+    /// the Timeline is not shown, are all placed.
     ready_drops: std::collections::VecDeque<(Vec<filmcraft_engine::project::ItemId>, egui::Pos2)>,
     /// Files being dragged over the window from the OS (count, pointer): the Timeline previews where they would land.
     file_drag_hover: Option<(usize, egui::Pos2)>,
@@ -1874,9 +1875,6 @@ impl FilmcraftApp {
         self.drop_imports.retain(|d| running.iter().any(|p| p.job == d.0));
         self.sync_timeline_view();
         self.handle_drops(&ctx);
-        if self.pending_timeline_drop.is_none() {
-            self.pending_timeline_drop = self.ready_drops.pop_front();
-        }
         if let Some(rx) = self.command_inbox.take() {
             while let Ok(id) = rx.try_recv() {
                 // control-only mode ignores native menu commands, but Quit stays available (#1943)
@@ -1910,6 +1908,14 @@ impl FilmcraftApp {
         }
         let status_h = if self.ui.show_status_bar { 20.0 } else { 0.0 };
         let body = egui::Rect::from_min_max(egui::pos2(full.min.x + 1.0, header.max.y + 1.0), egui::pos2(full.max.x - 1.0, full.max.y - status_h - 2.0));
+        // a finished drop waits while the Timeline is not drawn (Import or Export mode), and the
+        // next one gets its frame without waiting for input
+        if self.ui.mode == state::Mode::Edit && self.pending_timeline_drop.is_none() {
+            self.pending_timeline_drop = self.ready_drops.pop_front();
+        }
+        if !self.ready_drops.is_empty() {
+            ctx.request_repaint();
+        }
         match self.ui.mode {
             state::Mode::Edit => self.dock_area(ui, body),
             state::Mode::Import => panels::import_mode::show(self, ui, body),
