@@ -74,6 +74,12 @@ pub fn eta_suffix(job: &serde_json::Value) -> String {
 }
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {
+    let started = web_time::Instant::now();
+    show_kind(app, ui, p, rect);
+    app.ui_timing.panel(p.title(), started.elapsed());
+}
+
+fn show_kind(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {
     match p {
         PanelKind::Program if !app.session.state.edit_points.is_empty() => trim_monitor::show(app, ui, rect),
         PanelKind::Program => monitor::show(app, ui, rect, monitor::Which::Program),
