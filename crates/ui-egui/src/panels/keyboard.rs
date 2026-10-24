@@ -169,8 +169,10 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Val
         "panel.selectFindBox" => Ok(focus_find_box(app, ctx)),
         "window.workspace.learning" | "window.workspace.review" => {
             let name = if id.ends_with("learning") { "Learning" } else { "Review" };
-            app.set_workspace(name);
-            Ok(json!({"workspace": name}))
+            app.set_workspace_set(crate::dock::WorkspaceSet::Standard).map(|()| {
+                app.set_workspace(name);
+                json!({"workspace": name})
+            })
         }
         "view.programZoom100" | "view.programZoomFit" | "view.sourceZoom100" | "view.sourceZoomFit" => {
             let v = if id.starts_with("view.program") { &mut app.ui.program } else { &mut app.ui.source };

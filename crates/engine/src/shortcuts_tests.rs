@@ -219,6 +219,26 @@ fn compat_presets_map_other_editors() {
     s.execute("shortcuts.loadPreset", json!({"name": "Avid Media Composer Compatible"})).unwrap();
     assert_eq!(s.shortcuts.primary("sequence.lift").as_deref(), Some("Z"));
     assert_eq!(s.shortcuts.for_command("markers.markIn").len(), 2, "I and E");
+    s.execute("shortcuts.loadPreset", json!({"name": "Evolve"})).unwrap();
+    assert_eq!(s.shortcuts.primary("source.insert").as_deref(), Some("F9"));
+    assert_eq!(s.shortcuts.primary("tool.razor").as_deref(), Some("B"));
+    assert_eq!(s.shortcuts.primary("sequence.addEdit").as_deref(), Some("Cmd+B"));
+    assert_eq!(s.shortcuts.primary("markers.markSelection").as_deref(), Some("Shift+A"));
+    assert_eq!(s.shortcuts.primary("markers.goNext").as_deref(), Some("Shift+Down"));
+    assert!(s.shortcuts.primary("playhead.nextEditAnyTrack").is_none(), "Shift+Down was taken by Go to Next Marker");
+    // every Evolve entry whose command is known here is bound as listed, with its context (the
+    // frontend's commands are covered by crates/ui-egui/tests/keyboard_ui.rs)
+    for (id, keys, panel) in crate::shortcut_presets::EVOLVE {
+        if !s.shortcuts.commands().iter().any(|c| c.id == *id) {
+            continue;
+        }
+        let panel = (!panel.is_empty()).then_some(*panel);
+        assert!(
+            s.shortcuts.for_command(id).iter().any(|b| b.keys == *keys && b.panel.as_deref() == panel),
+            "{id} {keys} {panel:?}: {:?}",
+            s.shortcuts.for_command(id)
+        );
+    }
     assert!(!s.shortcuts.modified);
     assert!(s.execute("shortcuts.loadPreset", json!({"name": "Nope"})).is_err());
     s.execute("shortcuts.loadPreset", json!({"name": "FilmCraft Default"})).unwrap();
