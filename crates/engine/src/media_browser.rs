@@ -299,8 +299,10 @@ impl BrowserIo {
     const VOLUMES_FRESH: std::time::Duration = std::time::Duration::from_secs(10);
     const LIST_FRESH: std::time::Duration = std::time::Duration::from_secs(3);
     /// Reads at once: a dead share holds its thread until the OS gives up, and no more are
-    /// started past this many.
-    const MAX_READS: usize = 8;
+    /// started past this many in all, nor past [`Self::MAX_READS_PER_ROOT`] on one drive or share,
+    /// so a few dead shares never keep a local folder from being read.
+    const MAX_READS: usize = 16;
+    const MAX_READS_PER_ROOT: usize = 4;
     const MAX_LISTS: usize = 512;
 
     fn state(&self) -> std::sync::MutexGuard<'_, IoState> {
@@ -368,7 +370,10 @@ impl BrowserIo {
         let start = {
             let mut st = self.state();
             let old = fresh || st.lists.get(&key).is_none_or(|(t, _)| t.elapsed() >= Self::LIST_FRESH);
-            let start = old && !st.reading.contains(&key) && st.reading.len() < Self::MAX_READS;
+            let volumes = st.volumes.as_ref().map_or(&[][..], |(_, v)| v.as_slice());
+            let root = read_root(dir, volumes);
+            let on_root = st.reading.iter().filter(|d| read_root(d, volumes) == root).count();
+            let start = old && !st.reading.contains(&key) && st.reading.len() < Self::MAX_READS && on_root < Self::MAX_READS_PER_ROOT;
             if start {
                 st.reading.insert(key.clone());
             }
@@ -399,8 +404,9 @@ impl BrowserIo {
         }
         let st = self.state();
         let listing = match st.lists.get(&key) {
-            // an older listing stands in while a fresh one is read, unless this read was asked for
-            Some((at, l)) if !(fresh && start && st.reading.contains(&key) && at.elapsed() >= Self::LIST_FRESH) => l.clone(),
+            // the last listing stands in while a fresh one is read, but not as the answer to a
+            // read asked for now (`read`): that one is pending until it is done
+            Some((_, l)) if !(fresh && start && st.reading.contains(&key)) => l.clone(),
             Some(_) | None => Listing::Pending,
         };
         match listing {
@@ -410,6 +416,23 @@ impl BrowserIo {
             l => l,
         }
     }
+}
+
+/// The drive or share `dir` is on, to share out the reads: the longest scanned volume that holds
+/// it (the system root aside), else its first component (`X:`, `server\share`, `/home`).
+fn read_root(dir: &str, volumes: &[Volume]) -> String {
+    const SEPS: [char; 2] = ['/', '\\'];
+    let holds = |v: &str| dir == v || dir.strip_prefix(v).is_some_and(|rest| v.ends_with(SEPS) || rest.starts_with(SEPS));
+    let volume = volumes.iter().map(|v| v.path.as_str()).filter(|v| !v.trim_matches(SEPS).is_empty() && holds(v)).max_by_key(|v| v.len());
+    if let Some(v) = volume {
+        return v.to_string();
+    }
+    if windows_style(dir) {
+        // a drive letter, or a UNC path's server and share
+        let parts = if dir.starts_with(r"\\") { 2 } else { 1 };
+        return dir.trim_start_matches('\\').split('\\').take(parts).collect::<Vec<_>>().join("\\");
+    }
+    dir.split('/').find(|c| !c.is_empty()).map_or_else(|| "/".to_string(), |c| format!("/{c}"))
 }
 
 /// Run `work` on a thread named `name` and wait up to `wait` for it (on the web, where there are
@@ -1072,6 +1095,21 @@ pub fn std_home_dir() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_are_shared_out_by_drive_or_share() {
+        let vol = |p: &str| Volume { name: String::new(), path: p.into(), kind: VolumeKind::Local, pending: false };
+        let vols = [vol("/"), vol("/Volumes/Card"), vol("/Network/Studio"), vol("X:\\")];
+        assert_eq!(read_root("/Volumes/Card/DCIM", &vols), "/Volumes/Card");
+        assert_eq!(read_root("/Volumes/Cardigan/x", &vols), "/Volumes", "a volume holds only its own folders");
+        assert_eq!(read_root("/Network/Studio", &vols), "/Network/Studio");
+        assert_eq!(read_root("/home/me/Movies", &vols), "/home", "the system root does not count as one drive");
+        assert_eq!(read_root("X:\\Footage\\Day1", &vols), "X:\\");
+        assert_eq!(read_root("Y:\\Footage", &[]), "Y:");
+        assert_eq!(read_root(r"\\nas\media\2026\day1", &[]), r"nas\media");
+        assert_eq!(read_root("/", &[]), "/");
+        assert_eq!(read_root("", &[]), "/");
+    }
 
     #[test]
     fn format_date_is_utc_minutes() {

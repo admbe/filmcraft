@@ -434,3 +434,65 @@ fn a_refused_reader_thread_leaves_nothing_in_progress() {
     let (volumes, scanning) = s.browser.io.volumes(&services);
     assert!(!scanning && !volumes.is_empty(), "{volumes:?}");
 }
+
+/// A file system whose `/Volumes/Dead` share never answers until released.
+struct DeadShare {
+    fs: FakeFs,
+    released: std::sync::atomic::AtomicBool,
+}
+
+impl Services for DeadShare {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.fs.read_file(path)
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        self.fs.write_file(path, data)
+    }
+    fn file_size(&self, path: &str) -> std::io::Result<u64> {
+        self.fs.file_size(path)
+    }
+    fn list_entries(&self, dir: &str) -> Option<std::io::Result<Vec<DirEntry>>> {
+        while dir.starts_with("/Volumes/Dead") && !self.released.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        self.fs.list_entries(dir)
+    }
+    fn volumes(&self) -> Vec<Volume> {
+        self.fs.volumes()
+    }
+    fn home_dir(&self) -> Option<String> {
+        self.fs.home_dir()
+    }
+}
+
+/// Every folder opened on a share that does not answer held a read, and once eight were held no
+/// folder anywhere could be read, local ones included, until the share gave up. A share now holds
+/// only a few of the reads.
+#[test]
+fn a_dead_share_cannot_take_every_read() {
+    let fs = Arc::new(DeadShare { fs: FakeFs::new(), released: Default::default() });
+    let s = Session::new(fs.clone());
+    let services = s.services.clone();
+    for n in 0..12 {
+        let dir = format!("/Volumes/Dead/Day{n}");
+        assert!(matches!(s.browser.io.listing(&services, &dir, "all"), media_browser::Listing::Pending), "{dir}");
+    }
+    let local = s.browser.io.read(&services, "/home/me/Movies", "all", std::time::Duration::from_secs(5));
+    fs.released.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(matches!(local, media_browser::Listing::Ready(_)), "a local folder is read: {local:?}");
+}
+
+/// `read` asks for a folder as it is now: while that read is still going, the answer is pending,
+/// not the listing from a moment ago.
+#[test]
+fn a_fresh_read_still_going_is_pending() {
+    let delay = std::time::Duration::from_millis(400);
+    let s = Session::new(Arc::new(SlowFs { fs: FakeFs::new(), delay, reads: Default::default() }));
+    let services = s.services.clone();
+    let wait = std::time::Duration::from_secs(5);
+    assert!(matches!(s.browser.io.read(&services, "/home/me/Movies", "all", wait), media_browser::Listing::Ready(_)));
+    let again = s.browser.io.read(&services, "/home/me/Movies", "all", std::time::Duration::from_millis(20));
+    assert!(matches!(again, media_browser::Listing::Pending), "{again:?}");
+    // the panel's listing keeps showing the last one meanwhile
+    assert!(matches!(s.browser.io.listing(&services, "/home/me/Movies", "all"), media_browser::Listing::Ready(_)));
+}
