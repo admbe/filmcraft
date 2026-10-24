@@ -111,6 +111,11 @@ fn new_name(app: &FilmcraftApp, name: &str) -> Result<String, String> {
     if let Some(n) = dock::find(&app.workspaces, name) {
         return Err(format!("a workspace named `{n}` already exists"));
     }
+    // the other set's built-ins too: a saved "Cut" in the Standard set would count as built-in
+    // (`is_builtin`) and could never be renamed or deleted
+    if let Some(n) = WorkspaceSet::ALL.iter().flat_map(|set| set.builtins()).find(|n| slug(n) == slug(name)) {
+        return Err(format!("`{n}` is the name of a built-in workspace"));
+    }
     Ok(name.to_string())
 }
 

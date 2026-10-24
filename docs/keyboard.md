@@ -13,8 +13,7 @@ channel (`engine.execute` / `ui.menu.invoke`) and MCP (`command_run`).
 Tests: `crates/engine/src/keyboard_tests.rs` (no key used twice in one scope; behaviour of the
 keyboard commands, with undo) and `crates/ui-egui/tests/it/keyboard_ui.rs` (no dangling ids in the
 tables, no conflicts in FilmCraft Default or the Premiere preset, keys pressed in the headless app).
-The other presets are Final Cut Pro, Avid Media Composer and
-[Evolve](#evolve-preset).
+The Evolve preset is described [below](#evolve-preset).
 
 ## Keyboard-only commands (M3.12)
 
@@ -54,6 +53,8 @@ suites are operated; nothing from any other product is used. Like the
 other presets it starts from FilmCraft Default and gives each listed command exactly the listed
 keys, taking a key away from whatever else had it (so Find loses ⌘F to the full-screen viewer,
 and the Track Select tools lose A / ⇧A to the Selection tool and Mark Selection).
+A custom preset saved as "Evolve" before this preset existed is kept: its file is untouched and
+it is listed, loaded and restored at launch as **Evolve (custom)**.
 
 | Group | Key → FilmCraft command |
 |---|---|
@@ -69,7 +70,8 @@ and the Track Select tools lose A / ⇧A to the Selection tool and Mark Selectio
 | Project and application | ⌘N New Sequence, ⇧⌘N New Bin, ⌘I Import, ⌘S / ⇧⌘S, ⌘, Settings, ⌥⌘K Keyboard Shortcuts, ⌘Q |
 
 Tests: `keyboard_tests::shortcut_tables_have_no_key_used_twice_in_one_scope` (the table),
-`shortcuts_tests` (the preset loads with no conflicts on macOS, every entry bound as listed) and
+`shortcuts_tests` (the preset loads with no conflicts on macOS, every entry bound as listed, ⇧J / ⇧L
+free; a custom "Evolve" stays reachable) and
 `crates/ui-egui/tests/keyboard_ui.rs` (every id is a command; no conflicts on macOS or Windows
 with the frontend's commands registered).
 
@@ -83,10 +85,10 @@ with the frontend's commands registered).
 | Modify Marker (⇧M) | Markers are edited from their dialog (double-click) or `markers.edit {marker}`; there is no "edit the marker at the playhead" key. |
 | Flag Clip (G) and the flag colours | FilmCraft has label colours (Edit ▸ Label), not per-clip flags. |
 | Select Clips Forward / Backward on This Track (Y / ⌥Y) and on All Tracks (⌘Y / ⌥⌘Y) | FilmCraft's Track Select tools select by clicking; there is no keyboard selection from the playhead. |
-| Compositing page (⇧5) | No node-compositing page; the key stays free. |
+| Compositing page (⇧5) | No node-compositing page; the key keeps its FilmCraft Default meaning (the Effect Controls panel). |
 | Enhanced Viewer (⌥F), Full Page Viewer (⇧F) | Only Toggle Full Screen (⌘F) and Maximize Frame (⇧`) exist. |
 | Smart Insert, Smart Overwrite and edits at a smart indicator | Cut-page features without a FilmCraft counterpart. |
-| Fast forward / reverse (⇧L / ⇧J) | FilmCraft has slow forward / reverse on those keys in FilmCraft Default; the preset leaves them unbound rather than map them wrongly. |
+| Fast forward / reverse (⇧L / ⇧J) | FilmCraft has slow forward / reverse on those keys in FilmCraft Default; the preset leaves them unbound rather than map them wrongly (`shortcut_presets::EVOLVE_UNBOUND`). |
 | Render cache and compositing output cache (⌥R and the cache menu) | Render previews work from In/Out (Sequence menu), not from a cache toggle. |
 
 ## Skipped Premiere default shortcuts

@@ -362,7 +362,8 @@ impl Tokens {
 fn evolve(dark: Tokens) -> Tokens {
     let panel = Color32::from_rgb(0x28, 0x28, 0x2d);
     let chrome = Color32::from_rgb(0x1f, 0x1f, 0x24);
-    let accent = Color32::from_rgb(0xe0, 0x6a, 0x2c);
+    // a fill under white labels (4.5:1); as text on the panels the orange is `hot_text`
+    let accent = Color32::from_rgb(0xbe, 0x51, 0x1b);
     let text = Color32::from_rgb(0xe4, 0xe4, 0xea);
     let text_dim = Color32::from_rgb(0xb4, 0xb4, 0xbc);
     let text_faint = Color32::from_rgb(0x86, 0x86, 0x90);
@@ -376,7 +377,7 @@ fn evolve(dark: Tokens) -> Tokens {
         tab_text_active: text,
         focus: Color32::from_rgb(0xe8, 0x7e, 0x46),
         accent,
-        accent_hover: Color32::from_rgb(0xec, 0x7f, 0x44),
+        accent_hover: Color32::from_rgb(0xc4, 0x54, 0x1b),
         text,
         text_dim,
         text_faint,
@@ -456,6 +457,14 @@ fn evolve(dark: Tokens) -> Tokens {
 }
 
 impl Tokens {
+    /// The highlight as text on the panels (links, "Active" and "User" labels, the shortcut being
+    /// recorded). The Evolve orange
+    /// is a fill dark enough for white labels, too dark for normal text on its charcoal panels, so
+    /// there the text is the lighter `hot_text` orange; the other themes use the highlight itself.
+    pub fn accent_text(&self) -> Color32 {
+        if self.kind == ThemeKind::Evolve { self.hot_text } else { self.accent }
+    }
+
     /// Settings ▸ Appearance on top of a theme: the highlight colour (selections, primary buttons,
     /// the focus outline, the playhead, timecodes, drag values and track targeting) and accessible
     /// colour contrast (brighter secondary text and borders).
@@ -596,7 +605,7 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     v.override_text_color = Some(t.text);
     v.selection.bg_fill = t.accent;
     v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-    v.hyperlink_color = t.accent;
+    v.hyperlink_color = t.accent_text();
     v.window_stroke = Stroke::new(1.0, t.field_border);
     v.window_corner_radius = egui::CornerRadius::same(6);
     v.menu_corner_radius = egui::CornerRadius::same(6);
@@ -767,7 +776,16 @@ mod tests {
             let faint = contrast(t.text_faint, bg);
             assert!(faint >= 3.0, "faint text on {name}: {faint:.2}:1");
         }
-        assert!(contrast(Color32::WHITE, t.accent) >= 3.0, "white labels on the accent: {:.2}:1", contrast(Color32::WHITE, t.accent));
+        // the accent as a fill under white labels (primary buttons, selections), also hovered, and
+        // as text on the surfaces (links, labels): normal text, 4.5:1
+        for (what, fill) in [("accent", t.accent), ("hovered accent", t.accent_hover)] {
+            let ratio = contrast(Color32::WHITE, fill);
+            assert!(ratio >= 4.5, "white labels on the {what}: {ratio:.2}:1 is below WCAG AA");
+        }
+        for (name, bg) in surfaces {
+            let ratio = contrast(t.accent_text(), bg);
+            assert!(ratio >= 4.5, "accent text on {name}: {ratio:.2}:1 is below WCAG AA");
+        }
         assert!(contrast(t.accent, t.panel_bg) >= 3.0 && contrast(t.focus, t.panel_bg) >= 3.0 && contrast(t.playhead, t.tl_track_bg) >= 3.0);
         // Dark chrome around lighter panels, as in page-based suites: the window background is the darkest surface.
         let lum = |c: Color32| u16::from(c.r()) + u16::from(c.g()) + u16::from(c.b());

@@ -864,14 +864,19 @@ impl FilmcraftApp {
 
     /// Window ▸ Workspace Set: switch the family of built-in workspaces (saved to
     /// `workspaces.json`) and show the current workspace's namesake in the new set, else the
-    /// set's default workspace.
+    /// set's default workspace. When the file can't be written the switch still completes in
+    /// memory (the layout always matches the set) and the error is returned.
     pub fn set_workspace_set(&mut self, set: dock::WorkspaceSet) -> Result<(), String> {
         if self.workspaces.set != set {
             let mut next = self.workspaces.clone();
             next.set = set;
-            self.set_workspaces(next)?;
+            let saved = self.set_workspaces(next);
             let name = dock::find(&self.workspaces, &self.ui.workspace).unwrap_or_else(|| set.default_workspace().to_string());
             self.set_workspace(&name);
+            if let Err(e) = saved {
+                self.ui.status = e.clone();
+                return Err(e);
+            }
         }
         Ok(())
     }

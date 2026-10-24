@@ -22,7 +22,7 @@ for each mode. The dark card offers three themes; the light card one.
 |---|---|---|
 | `darkest` (default) | Darkest | black gutters, `#1d1d1d` panels, blue highlight |
 | `dark` | Dark | the same with lighter panels |
-| `evolve` | Evolve Dark | cool charcoal panels (`#28282d`) on a near-black window, thin gutters, a warm orange highlight (`#e06a2c`), red playhead, near-white timecodes, a darker viewer well |
+| `evolve` | Evolve Dark | cool charcoal panels (`#28282d`) on a near-black window, thin gutters, a warm orange highlight (`#be511b`, with `#f2a26a` for orange text), red playhead, near-white timecodes, a darker viewer well |
 | `light` | Light | light grey panels, dark text |
 
 Ways to choose a theme:
@@ -55,7 +55,10 @@ blue. A colour of the user's own applies to every theme.
 secondary text, tab labels, icons, timecodes and ruler text reach WCAG AA (4.5:1) against every
 surface they are drawn on (panels, tab strips, header, fields, hover and selected rows, the
 timeline, the ruler, the monitor well and the window background); faint labels reach 3:1; the
-highlight, focus outline and playhead stand out from their backgrounds at 3:1 or better.
+highlight, focus outline and playhead stand out from their backgrounds at 3:1 or better. The
+orange highlight is a fill dark enough for white labels (primary buttons, selections, also
+hovered) at 4.5:1; where the highlight is text (links, "Active" and "User" labels) the theme
+uses its lighter orange (`Tokens::accent_text`), also at 4.5:1 on every surface.
 Accessible color contrast (the same page) brightens secondary text and borders further.
 
 ## Workspace sets and the Evolve pages

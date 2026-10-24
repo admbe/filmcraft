@@ -169,7 +169,7 @@ fn page_bar_pages_menu_deliver_and_restart() {
     assert_eq!((d.workspace().as_str(), d.app().workspaces.set), ("Cut", WorkspaceSet::Evolve));
     // unknown names are errors, not crashes
     assert_eq!(d.call("ui.menu.invoke", json!({"command": "window.page.compositing", "params": {}}))["ok"], false);
-    assert_eq!(d.call("ui.set", json!({"workspaceSet": "avid"}))["ok"], false);
+    assert_eq!(d.call("ui.set", json!({"workspaceSet": "nonsense"}))["ok"], false);
 
     // the set and the page in use come back after a restart
     d.ok("ui.set", json!({"workspaceSet": "evolve", "workspace": "Color"}));
@@ -189,5 +189,43 @@ fn page_bar_pages_menu_deliver_and_restart() {
     d.ok("ui.set", json!({"workspaceSet": "evolve", "workspace": "Cut"}));
     d.ok("ui.set", json!({"workspaceSet": "standard"}));
     assert_eq!(d.workspace(), "Editing", "Cut has no namesake in the Standard set");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn builtin_names_of_either_set_cannot_be_saved() {
+    let data = data_dir("reserved");
+    let mut d = Driver::launch(&data);
+    // the Standard set: the Evolve pages' names are reserved too (a saved "Cut" would count as a
+    // built-in workspace that can never be renamed or deleted)
+    for name in ["Cut", "media", "Deliver"] {
+        let r = d.call("ui.menu.invoke", json!({"command": "window.workspace.saveAs", "params": {"name": name}}));
+        assert_eq!(r["ok"], false, "{name}: {r}");
+        assert!(r["error"].as_str().unwrap_or_default().contains("built-in"), "{name}: {r}");
+    }
+    // and the Evolve set: the Standard workspaces' names, for Save as New and Rename
+    d.menu("window.workspaceSet.evolve", json!({}));
+    for name in ["Editing", "assembly"] {
+        let r = d.call("ui.menu.invoke", json!({"command": "window.workspace.saveAs", "params": {"name": name}}));
+        assert_eq!(r["ok"], false, "{name}: {r}");
+    }
+    d.menu("window.workspace.saveAs", json!({"name": "Grade"}));
+    assert_eq!(d.call("ui.menu.invoke", json!({"command": "window.workspace.rename", "params": {"from": "Grade", "to": "Editing"}}))["ok"], false);
+    assert!(d.app().workspaces.saved.iter().all(|s| s.name == "Grade"), "{:?}", d.app().workspaces.saved);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn workspace_set_switch_completes_when_the_file_cannot_be_written() {
+    let data = data_dir("unwritable");
+    // a directory where workspaces.json goes: every save fails
+    std::fs::create_dir_all(data.join("workspaces.json")).unwrap();
+    let mut d = Driver::launch(&data);
+    let r = d.call("ui.menu.invoke", json!({"command": "window.workspaceSet.evolve", "params": {}}));
+    assert_eq!(r["ok"], false, "the save error reaches the caller: {r}");
+    // the set, the page and its layout still switched together
+    assert_eq!((d.app().workspaces.set, d.workspace().as_str()), (WorkspaceSet::Evolve, "Edit"));
+    assert_eq!(d.app().ui.dock, filmcraft_ui_egui::dock::evolve_page("Edit"));
+    assert!(d.app().ui.status.contains("saving workspaces"), "{}", d.app().ui.status);
     let _ = std::fs::remove_dir_all(&data);
 }

@@ -571,3 +571,8 @@ pub const EVOLVE: &[Entry] = &[
     ("app.keyboardShortcuts", "Cmd+Alt+K", ""),
     ("app.quit", "Cmd+Q", ""),
 ];
+
+/// Commands the Evolve preset leaves with no key: such suites use ⇧J / ⇧L for fast reverse /
+/// forward, which FilmCraft has no command for, so FilmCraft Default's slow shuttle keys there are
+/// dropped rather than kept with a different meaning (`docs/keyboard.md`).
+pub const EVOLVE_UNBOUND: &[&str] = &["playback.slowReverse", "playback.slowForward"];
