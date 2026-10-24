@@ -235,11 +235,22 @@ fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
     // Out-of-range audio stream data is repaired, not refused: failing the load would lose the
     // whole project over one bad index. A media item keeps its first `MAX_AUDIO_STREAMS` streams; a
     // clip pointing past that plays stream 0.
+    // Camera RAW settings a RAW source would refuse at its first frame are repaired here, not
+    // refused: the project's fall back to what a project from before them reads as, a clip's own
+    // give way to the project's.
+    if let Err(e) = loaded.project.settings.camera_raw.validate() {
+        log::warn!("Project Settings ▸ Camera RAW: {e}; using the defaults");
+        loaded.project.settings.camera_raw = filmcraft_media::RawDevelop::default();
+    }
     let max = filmcraft_media::MAX_AUDIO_STREAMS;
     for item in loaded.project.items.values_mut() {
         let name = item.name.clone();
         match &mut item.kind {
             filmcraft_project::ItemKind::Media(m) => {
+                if let Some(Err(e)) = m.interpret.develop.as_ref().map(filmcraft_media::RawDevelop::validate) {
+                    log::warn!("media `{name}`: Camera RAW settings: {e}; it follows the project's");
+                    m.interpret.develop = None;
+                }
                 if let Some(video) = &m.info.video {
                     filmcraft_project::validate_frame_size(video.width, video.height).map_err(|e| FormatError::Corrupt(format!("media `{name}`: {e}")))?;
                 }
@@ -460,6 +471,46 @@ mod tests {
             assert!(!l.migrated());
             assert_eq!(l.generator.as_deref(), Some(generator().as_str()));
         }
+    }
+
+    /// Camera RAW settings a RAW source would refuse (a gamma that does not go with the colour
+    /// space, a hand edit) are repaired when the project opens, not when a frame is asked for.
+    #[test]
+    fn invalid_camera_raw_settings_are_repaired_on_load() {
+        use filmcraft_media::{RawColorSpace, RawDevelop, RawGamma};
+        let bad = RawDevelop { color_space: RawColorSpace::Rec709, gamma: RawGamma::Log3G10, ..RawDevelop::default() };
+        assert!(bad.validate().is_err());
+        let mut p = Project::new("Camera RAW");
+        p.settings.camera_raw = bad;
+        let clip = filmcraft_project::MediaClip {
+            media: filmcraft_project::MediaRef::File { path: "a.R3D".into() },
+            info: filmcraft_media::MediaInfo {
+                name: "a.R3D".into(),
+                kind: filmcraft_media::MediaKind::Movie,
+                duration: filmcraft_time::Tick(0),
+                video: None,
+                audio_streams: vec![],
+                container: "r3d".into(),
+                start_timecode: None,
+                file_size: None,
+            },
+            interpret: filmcraft_project::Interpretation { develop: Some(bad), ..Default::default() },
+            mark_in: None,
+            mark_out: None,
+            markers: vec![],
+            offline: false,
+            proxy: None,
+            identity: None,
+        };
+        let id = p.add_item("a.R3D", filmcraft_project::Label::Caribbean, filmcraft_project::ItemKind::Media(clip), None);
+        let loaded = decode(&encode(&p, false)).unwrap();
+        assert_eq!(loaded.project.settings.camera_raw, RawDevelop::default());
+        let filmcraft_project::ItemKind::Media(m) = &loaded.project.items[&id].kind else { panic!("not media") };
+        assert_eq!(m.interpret.develop, None, "the clip follows the project's settings");
+        // valid settings are kept as they are
+        let mut p = Project::new("Camera RAW");
+        p.settings.camera_raw = RawDevelop::STANDARD;
+        assert_eq!(decode(&encode(&p, false)).unwrap().project.settings.camera_raw, RawDevelop::STANDARD);
     }
 
     #[test]
