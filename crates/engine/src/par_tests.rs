@@ -369,3 +369,33 @@ fn ffmpeg_anamorphic_files_fill_a_square_frame_and_make_anamorphic_sequences() {
         assert!(c.iter().all(|a| *a > 0.99), "{}: {c:?}", file.display());
     }
 }
+
+/// New Desqueezed Sequence From Clip on a subclip: the sequence of its anamorphic parent, the
+/// subclip's range edited in and filled like the parent; `desqueezed` is in the result.
+#[test]
+fn a_subclip_of_an_anamorphic_clip_makes_the_same_desqueezed_sequence() {
+    let mut s = Session::default();
+    s.execute("file.newSequence", json!({"name": "Rate", "fps": 23.976})).unwrap();
+    let r = s.execute("file.newColorMatte", json!({"color": "#ff0000", "width": 6048, "height": 3402, "seconds": 2.0})).unwrap();
+    let item = ItemId(r["item"].as_u64().unwrap());
+    s.execute("clip.interpretFootage", json!({"items": [item.0], "pixelAspect": [133, 100]})).unwrap();
+    let r24 = FrameRate::FPS_23_976;
+    s.execute("project.setMarks", json!({"item": item.0, "in": r24.tick_of(12).0, "out": r24.tick_of(35).0})).unwrap();
+    let sub = ItemId(s.execute("clip.makeSubclip", json!({"item": item.0, "name": "Sub"})).unwrap()["item"].as_u64().unwrap());
+    let Some(ItemKind::Subclip { range, .. }) = s.project.item(sub).map(|i| i.kind.clone()) else { panic!("not a subclip") };
+    let r = s.execute("file.newSequence", json!({"name": "Sub", "fromItem": sub.0, "desqueeze": true})).unwrap();
+    assert_eq!(r["desqueezed"], true, "{r}");
+    let st = s.active_sequence().unwrap().settings.clone();
+    assert_eq!((st.width, st.height, st.par), (8044, 3402, (1, 1)));
+    assert_eq!(st.preset, "6K Anamorphic 1.33x desqueezed 8044x3402 23.976");
+    let it = s.active_sequence().unwrap().video_tracks[0].items[0].clone();
+    assert_eq!((it.item, it.source_in), (sub, range.start), "the subclip's own range");
+    // scaled from the media's size, as its parent is (not from a 1920 x 1080 fallback)
+    assert!((motion_scale(&s, it.id) - 8044.0 / (6048.0 * 1.33) * 100.0).abs() < 1e-9, "{}", motion_scale(&s, it.id));
+    // the parent reports it too; without `desqueeze` it is false
+    let r = s.execute("file.newSequence", json!({"name": "Media", "fromItem": item.0, "desqueeze": true})).unwrap();
+    assert_eq!(r["desqueezed"], true);
+    let r = s.execute("file.newSequence", json!({"name": "Squeezed", "fromItem": sub.0})).unwrap();
+    assert_eq!(r["desqueezed"], false);
+    assert_eq!(s.active_sequence().unwrap().settings.par, (133, 100), "a subclip keeps its parent's pixels");
+}

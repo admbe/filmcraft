@@ -1334,3 +1334,23 @@ fn own_importer_reads_32_bit_flac_at_full_scale() {
         }
     }
 }
+
+/// Export settings saved before Match Source wrote `null` for square pixels: they still export
+/// square, while left out (or `"matchSource"`) is Match Source and a ratio stays a ratio.
+#[test]
+fn a_saved_null_pixel_aspect_still_means_square_pixels() {
+    let load = |v: serde_json::Value| serde_json::from_value::<crate::ExportSettings>(v);
+    assert_eq!(load(serde_json::json!({"format": "h264", "pixelAspect": null})).unwrap().pixel_aspect, Some((1, 1)));
+    assert_eq!(load(serde_json::json!({"format": "h264"})).unwrap().pixel_aspect, None);
+    assert_eq!(load(serde_json::json!({"pixelAspect": "matchSource"})).unwrap().pixel_aspect, None);
+    assert_eq!(load(serde_json::json!({"pixelAspect": [4, 3]})).unwrap().pixel_aspect, Some((4, 3)));
+    for bad in [serde_json::json!("square"), serde_json::json!([4]), serde_json::json!(1.5)] {
+        assert!(load(serde_json::json!({"pixelAspect": bad.clone()})).is_err(), "{bad}");
+    }
+    // both meanings survive a save and a load
+    for par in [None, Some((1, 1)), Some((133, 100))] {
+        let s = crate::ExportSettings { pixel_aspect: par, ..Default::default() };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(load(v.clone()).unwrap().pixel_aspect, par, "{v}");
+    }
+}

@@ -290,6 +290,17 @@ fn sequence_settings_change_the_pixel_aspect_ratio_in_one_undo_step() {
     }
     s.execute("sequence.settings", json!({"pixelAspect": null, "maxRenderQuality": true})).unwrap();
     assert_eq!(s.active_sequence().unwrap().settings.par, (1, 1));
+    // the preset name follows the picture: a squeeze leaves the preset it no longer matches
+    s.execute("file.newSequence", json!({"name": "Named", "preset": "6K 16:9 6048x3402 23.976"})).unwrap();
+    s.execute("sequence.settings", json!({"maxRenderQuality": false})).unwrap();
+    assert_eq!(s.active_sequence().unwrap().settings.preset, "6K 16:9 6048x3402 23.976", "no picture change, no rename");
+    s.execute("sequence.settings", json!({"pixelAspect": [133, 100]})).unwrap();
+    let st = s.active_sequence().unwrap().settings.clone();
+    let expect = filmcraft_project::sequence_preset_of(&st).map_or_else(|| format!("6048x3402 {}", st.frame_rate.label()), |p| p.name.to_string());
+    assert_eq!(st.preset, expect);
+    assert_ne!(st.preset, "6K 16:9 6048x3402 23.976");
+    let inspected = s.execute("sequence.inspect", json!({})).unwrap();
+    assert!(!inspected.to_string().contains("6K 16:9 6048x3402"), "{inspected}");
     // New Sequence takes the ratio too, over a preset's
     s.execute("file.newSequence", json!({"name": "Ana", "preset": "6K 16:9 6048x3402 23.976", "pixelAspect": [133, 100]})).unwrap();
     let st = s.active_sequence().unwrap().settings.clone();

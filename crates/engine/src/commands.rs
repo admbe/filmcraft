@@ -1014,6 +1014,7 @@ pub(crate) fn place_item(
         ItemKind::Media(m) => m.info.video.as_ref().map(|v| (v.width, v.height)),
         ItemKind::Sequence(q) => Some((q.settings.width, q.settings.height)),
         ItemKind::AdjustmentLayer { width, height, .. } => Some((*width, *height)),
+        ItemKind::Subclip { .. } => s.project.resolve_media(item).and_then(|(_, m, _)| m.info.video.as_ref().map(|v| (v.width, v.height))),
         _ => None,
     }
     .unwrap_or((1920, 1080));
@@ -1222,7 +1223,8 @@ fn build() -> Vec<CommandSpec> {
                     from_ids.insert(0, one);
                 }
                 let mut st = SequenceSettings::default();
-                if let Some(from) = from_ids.first().and_then(|i| s.project.item(*i)).and_then(|i| i.as_media()) {
+                // a subclip takes its parent media's settings
+                if let Some((_, from, _)) = from_ids.first().and_then(|i| s.project.resolve_media(*i)) {
                     st = default_seq_settings_for(from);
                 }
                 // `desqueeze`: a clip with non-square pixels makes a square-pixel sequence at its display size
@@ -1297,17 +1299,20 @@ fn build() -> Vec<CommandSpec> {
                     Ok(id)
                 })?;
                 if let Some((&from, rest)) = from_ids.split_first() {
-                    let dur = s.project.item(from).map(|i| i.duration()).unwrap_or_default();
+                    // a subclip edits in with its own range of its parent's media
+                    let range = match s.project.item(from).map(|i| &i.kind) {
+                        Some(ItemKind::Subclip { range, .. }) => *range,
+                        _ => TimeRange::new(Tick::ZERO, s.project.item(from).map(|i| i.duration()).unwrap_or_default()),
+                    };
                     let tg = s.targeting();
-                    let ids =
-                        place_item(s, from, TimeRange::new(Tick::ZERO, dur), Tick::ZERO, tg.video_dest, tg.audio_dest, false, "New Sequence From Clip", None)?;
+                    let ids = place_item(s, from, range, Tick::ZERO, tg.video_dest, tg.audio_dest, false, "New Sequence From Clip", None)?;
                     if !rest.is_empty() {
                         let end = s.active_sequence().and_then(|q| ids.iter().filter_map(|c| q.find_item(*c).map(|(_, i)| i.end())).max()).unwrap_or_default();
                         place_items(s, &json!({"time": end.0}), &json!(rest.iter().map(|i| i.0).collect::<Vec<_>>()))?;
                     }
                 }
                 s.events.push(crate::Event::OpenSequence(id));
-                Ok(json!({"sequence": id.0}))
+                Ok(json!({"sequence": id.0, "desqueezed": desqueezed}))
             })
         ),
         query!("sequence.presets", "List Sequence Presets", "{}", |_, _| {
@@ -2290,6 +2295,7 @@ fn build() -> Vec<CommandSpec> {
                     }
                     let q = pr.sequence_mut(id).ok_or(EngineError::NoSequence)?;
                     let old_size = (q.settings.width, q.settings.height);
+                    let old_picture = (q.settings.width, q.settings.height, q.settings.frame_rate, q.settings.par);
                     if let Some(w) = checked_u32_p(&p, "width", CMD)? {
                         q.settings.width = w;
                     }
@@ -2325,6 +2331,14 @@ fn build() -> Vec<CommandSpec> {
                         c.auto_tone_map = v;
                     }
                     q.settings.working_space = q.settings.color.working.label().into();
+                    // a changed picture renames the sequence's preset unless it still matches it
+                    let st = &q.settings;
+                    if (st.width, st.height, st.frame_rate, st.par) != old_picture
+                        && !filmcraft_project::sequence_preset(&st.preset).is_some_and(|pr| pr.matches(st))
+                    {
+                        q.settings.preset = filmcraft_project::sequence_preset_of(st)
+                            .map_or_else(|| format!("{}x{} {}", st.width, st.height, st.frame_rate.label()), |pr| pr.name.to_string());
+                    }
                     q.settings.validate().map_err(|e| bad(CMD, e))?;
                     let new_size = (q.settings.width, q.settings.height);
                     Ok(if scale_motion { edit::frame_size::scale_motion(q, old_size, new_size) } else { 0 })
