@@ -863,6 +863,44 @@ fn caption_sidecars_keep_only_the_exported_interval() {
     }
 }
 
+/// The user's two ways with an exact 1.33x squeeze (a 604 x 34 stand-in for 6048 x 3402): the
+/// desqueezed sequence (804 x 34 from 803.32, square pixels; 8044 x 3402 at full size) exports square pixels
+/// at its own size, filled to both edges; the squeezed one keeps its pixels and records 133:100.
+/// ffprobe is the oracle.
+#[test]
+fn desqueezed_and_squeezed_sequences_export_their_pixels() {
+    let mut s = Session::default();
+    let r = s.execute("file.newColorMatte", json!({"color": "#ff0000", "width": 604, "height": 34, "seconds": 1.0})).unwrap();
+    let item = filmcraft_project::ItemId(r["item"].as_u64().unwrap());
+    s.execute("clip.interpretFootage", json!({"items": [item.0], "pixelAspect": [133, 100]})).unwrap();
+    let dir = Scratch::new("desqueeze");
+    let range = json!({"range": "custom", "startSeconds": 0.0, "endSeconds": 0.25, "audio": false, "wait": true});
+    for (desqueeze, size, sar) in [(true, (804.0, 34.0), None), (false, (604.0, 34.0), Some("133:100"))] {
+        s.execute("file.newSequenceFromClip", json!({"items": [item.0], "desqueeze": desqueeze})).unwrap();
+        for (name, format) in [("a.mp4", "h264"), ("a.mov", "prores")] {
+            let name = format!("{desqueeze}-{name}");
+            let mut p = range.clone();
+            p["path"] = json!(dir.path(&name));
+            p["format"] = json!(format);
+            let path = s.execute("file.exportMedia", p).unwrap()["path"].as_str().unwrap().to_string();
+            let Some(j) = probe(&path) else { return };
+            let v = stream(&j, "video").unwrap();
+            assert_eq!((num(&v["width"]), num(&v["height"])), size, "{name}: {v}");
+            match sar {
+                Some(sar) => assert_eq!(v["sample_aspect_ratio"].as_str(), Some(sar), "{name}: {v}"),
+                None => assert!(matches!(v["sample_aspect_ratio"].as_str(), None | Some("1:1") | Some("0:1")), "{name}: square: {v}"),
+            }
+            if desqueeze {
+                // red to the very first and last column: no bar, no hairline
+                let src = s.media.open_file(&path, &crate::FsServices).unwrap();
+                let frame = src.video_frame(filmcraft_media::FrameRequest::full(filmcraft_time::Tick::ZERO)).unwrap().to_rgba8();
+                let red = |x: usize, y: usize| frame[(y * 804 + x) * 4] > 200 && frame[(y * 804 + x) * 4 + 1] < 60;
+                assert!([0, 1, 402, 802, 803].iter().all(|x| red(*x, 17)), "{name}: filled edge to edge");
+            }
+        }
+    }
+}
+
 /// A sequence with non-square pixels (Sequence From Clip of a 1.33x anamorphic clip: 4:3 pixels)
 /// exports its pixels as they are at Match Source, with the ratio in the file (SPS VUI and `pasp`
 /// in MP4, `pasp` in QuickTime), so players desqueeze it; ffprobe is the oracle. An explicit
