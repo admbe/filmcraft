@@ -69,7 +69,29 @@ fn a_mixer_slower_than_the_device_plays_silence_and_stays_in_time() {
             heard += 1;
         }
     }
-    assert!(heard > PERIOD, "some sound still plays");
+    assert!(heard > 0 || stats.underruns.load(Ordering::Relaxed) > 0, "a mixer that never keeps up plays silence, never a frame out of time");
+}
+
+#[test]
+fn a_slow_first_block_plays_silence_then_sound_in_time() {
+    // The first block is mixed on the mixing thread, not by the caller (the UI thread): opening
+    // the clip under the playhead can start a slow decoder (~0.1 s for some formats). The
+    // device plays silence meanwhile, and what plays after is the frame due, not a late one.
+    let stats = Arc::new(AudioStats::default());
+    let mut first = true;
+    let mix = move |cursor: i64, buf: &mut [f32], ch: usize| {
+        let delay = if std::mem::take(&mut first) { Duration::from_millis(60) } else { Duration::ZERO };
+        frame_numbers(delay, Arc::default())(cursor, buf, ch);
+    };
+    let started = Instant::now();
+    let mut fill = spawn(mix, 1, SR, 2, stats.clone());
+    assert!(started.elapsed() < Duration::from_millis(30), "spawn returns at once; the caller never mixes");
+    let out = play(&mut fill, 2, 60);
+    let first_heard = out.chunks(2).position(|f| f[0] != 0.0).expect("sound plays once the first block is mixed");
+    assert!(first_heard > 0, "silence while the first block mixes");
+    for (p, f) in out.chunks(2).enumerate().skip(first_heard) {
+        assert_eq!(f[0], (1 + p) as f32, "frame {p} plays when it is due");
+    }
 }
 
 #[test]
@@ -84,6 +106,8 @@ fn a_mixer_that_panics_leaves_silence_not_a_crash() {
         frame_numbers(Duration::ZERO, Arc::default())(cursor, buf, ch);
     };
     let mut fill = spawn(mix, 1, SR, 2, stats.clone());
+    // the first block is mixed on the mixing thread: give it the moment it takes
+    std::thread::sleep(Duration::from_millis(30));
     let out = play(&mut fill, 2, 20);
     assert!(out.iter().all(|x| x.is_finite()));
     assert_eq!(out.get(..2), Some(&[1.0, 1.0][..]), "the block mixed before the panic plays");

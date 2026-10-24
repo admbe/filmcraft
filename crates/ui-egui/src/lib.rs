@@ -327,8 +327,8 @@ pub struct FilmcraftApp {
     /// The mouse press in progress (its start time) and the undo history when it began, for Escape
     /// to take back what the press changed (#580).
     value_press: Option<(f64, filmcraft_engine::UndoMark)>,
-    /// BS.1770 loudness of the programme as it plays, and the next sample position to feed.
-    pub(crate) loudness: Option<(filmcraft_audio_dsp::LoudnessMeter, i64)>,
+    /// BS.1770 loudness of the programme as it plays, measured off the UI thread.
+    pub(crate) loudness: panels::meters::LoudnessFeed,
     /// Status message last shown and when it first appeared (messages expire after a few seconds).
     status_seen: (String, f64),
     /// Screenshots waiting for their frame: (token, path, crop, reply, give-up time).
@@ -587,7 +587,7 @@ impl FilmcraftApp {
             synthetic: Vec::new(),
             mac_ctrl_click_armed: false,
             value_press: None,
-            loudness: None,
+            loudness: Default::default(),
             status_seen: (String::new(), 0.0),
             pending_screenshots: Vec::new(),
             queued_screenshots: Vec::new(),
@@ -2589,6 +2589,9 @@ mod audio_recovery_tests {
         struct Capture(Arc<Mutex<Vec<f32>>>);
         impl AudioOut for Capture {
             fn start(&mut self, mut fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
+                // the first block is mixed on the mixing thread (never by the caller): give it the
+                // moment it takes before the first callback, as a device's start-up does
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 let mut buf = vec![0.0; 2048];
                 fill(&mut buf, 2);
                 *self.0.lock().unwrap() = buf;

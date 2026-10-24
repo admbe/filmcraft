@@ -132,15 +132,17 @@ where
     let lead = ((sample_rate as f64 * LEAD_S) as usize).max(BLOCK_FRAMES * 2);
     let ring = Arc::new(Ring::new(lead * ch));
     let mut block = vec![0.0; BLOCK_FRAMES * ch];
-    mix(start, &mut block, ch);
-    ring.push(&block);
+    // The first block is mixed on the mixing thread too, never by the caller (the UI thread):
+    // mixing can open the clip under the playhead, and opening a slow decoder's audio stalled the
+    // UI at every play. The device plays silence until it arrives, which the cursor then skips as
+    // for any late block.
     // Frames the callback played as silence that the mixer has not skipped yet.
     let skip = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     {
         let (ring, skip, stop) = (ring.clone(), skip.clone(), stop.clone());
         let body = move || {
-            let mut cursor = start + BLOCK_FRAMES as i64;
+            let mut cursor = start;
             while !stop.load(Ordering::Acquire) {
                 if ring.len() + block.len() > lead * ch {
                     std::thread::sleep(Duration::from_millis(2));
