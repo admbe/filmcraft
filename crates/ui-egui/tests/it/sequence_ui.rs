@@ -601,6 +601,49 @@ fn sequence_settings_dialog_applies_in_one_undo_step() {
     assert_eq!(*d.app().session.project, before, "one undo step for the whole dialog");
 }
 
+/// Pixel Aspect Ratio is editable for an existing sequence: the named ratios (Interpret Footage's
+/// list, with the exact 1.33x squeeze apart from 4:3) and Custom; OK changes it in one undo step.
+#[test]
+fn sequence_settings_dialog_changes_the_pixel_aspect_ratio() {
+    let mut d = Driver::demo();
+    let before = (*d.app().session.project).clone();
+    d.ok("ui.menu.invoke", json!({"id": "sequence.settings"}));
+    d.frames(10);
+    d.click("sequenceSettings.par");
+    let options = d.ids("sequenceSettings.par.option.");
+    for id in ["1x1", "133x100", "4x3", "3x2", "2x1", "10x11", "custom"] {
+        assert!(options.iter().any(|i| i == &format!("sequenceSettings.par.option.{id}")), "{id} missing: {options:?}");
+    }
+    d.click("sequenceSettings.par.option.133x100");
+    d.frames(2);
+    assert_eq!(d.label("sequenceSettings.par"), "Anamorphic 1.33x, exact (1.33)");
+    // 1920 x 1080 with 1.33 pixels shows 2554 wide
+    assert_eq!(d.label("sequenceSettings.aspect"), "2.36:1");
+    d.click("sequenceSettings.ok");
+    assert!(d.ids("sequenceSettings.").is_empty(), "dialog closed");
+    assert_eq!(d.app().session.active_sequence().unwrap().settings.par, (133, 100));
+    d.exec("edit.undo", json!({}));
+    assert_eq!(*d.app().session.project, before, "one undo step");
+    // Custom: two numbers, sent in lowest terms
+    d.ok("ui.menu.invoke", json!({"id": "sequence.settings"}));
+    d.frames(10);
+    d.click("sequenceSettings.par");
+    d.click("sequenceSettings.par.option.custom");
+    d.frames(2);
+    assert!(d.ids("sequenceSettings.par.num").iter().any(|i| i == "sequenceSettings.par.num"));
+    d.app().ui.sequence_settings.par = (12, 10);
+    d.frames(2);
+    assert_eq!(d.label("sequenceSettings.par"), "Custom (1.2000)");
+    d.click("sequenceSettings.ok");
+    assert_eq!(d.app().session.active_sequence().unwrap().settings.par, (6, 5));
+    // a sequence with a ratio the list doesn't name opens on Custom
+    d.ok("ui.menu.invoke", json!({"id": "sequence.settings"}));
+    d.frames(10);
+    assert_eq!(d.label("sequenceSettings.par"), "Custom (1.2000)");
+    assert_eq!(d.label("sequenceSettings.par.den"), "5");
+    d.click("sequenceSettings.cancel");
+}
+
 /// The General tab's Sequence Name renames the sequence (its Project panel item) together with
 /// the other settings, in the same undo step; a blank name keeps the old one.
 #[test]

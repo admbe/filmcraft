@@ -630,6 +630,17 @@ pub fn trim_delta(s: &Session, clip: ClipId, edge: Edge, mode: TrimMode, delta: 
 /// Sequence settings matching a media clip (New Sequence From Clip, New Sequence from an item):
 /// its frame size, rate and pixel aspect ratio (Interpret Footage's, else the file's), so a
 /// 1440 x 1080 clip with 4:3 pixels makes a 1440 x 1080 sequence that displays 16:9.
+/// The `pixelAspect` parameter: `[num, den]`, a usable ratio in lowest terms
+/// ([`filmcraft_project::checked_par`]), or `None` when it is absent or null.
+pub(crate) fn pixel_aspect_param(p: &Value, cmd: &str) -> Result<Option<(u32, u32)>> {
+    match p.get("pixelAspect") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => crate::color::pixel_aspect_p(v)
+            .map(Some)
+            .ok_or_else(|| bad(cmd, format!("pixelAspect must be [num, den] between 1:{0} and {0}:1", filmcraft_project::MAX_PIXEL_ASPECT))),
+    }
+}
+
 pub(crate) fn default_seq_settings_for(media: &MediaClip) -> SequenceSettings {
     let info = &media.info;
     let mut st = SequenceSettings::default();
@@ -1174,7 +1185,7 @@ fn build() -> Vec<CommandSpec> {
             "Sequence…",
             ["File", "New"],
             Some("Cmd+N"),
-            r#"{"name":str,"preset":str?,"width":u32=1920,"height":u32=1080,"fps":f64=23.976,"sampleRate":u32=48000,"video":n=3,"audio":n=3,"mix":"Stereo|Mono|5.1|Adaptive"?,"trackType":"Standard|Mono|5.1|Adaptive"?,"fromItem":itemId?,"fromItems":[itemId]?}"#,
+            r#"{"name":str,"preset":str?,"width":u32=1920,"height":u32=1080,"fps":f64=23.976,"pixelAspect":[num,den]?,"sampleRate":u32=48000,"video":n=3,"audio":n=3,"mix":"Stereo|Mono|5.1|Adaptive"?,"trackType":"Standard|Mono|5.1|Adaptive"?,"fromItem":itemId?,"fromItems":[itemId]?}"#,
             always,
             |s, p| s.edit_group("New Sequence", |s| {
                 // `fromItems` is `fromItem` for a list: the first sets the sequence, the rest follow it back to back
@@ -1214,6 +1225,9 @@ fn build() -> Vec<CommandSpec> {
                 }
                 if let Some(fps) = fps_p(p, "file.newSequence")? {
                     st.frame_rate = fps;
+                }
+                if let Some(par) = pixel_aspect_param(p, "file.newSequence")? {
+                    st.par = par;
                 }
                 if let Some(sr) = checked_u32_p(p, "sampleRate", "file.newSequence")? {
                     st.sample_rate = sr;
@@ -2214,7 +2228,7 @@ fn build() -> Vec<CommandSpec> {
             "Sequence Settings…",
             ["Sequence"],
             None,
-            r#"{"width":u32?,"height":u32?,"fps":f64?,"name":str?,"sampleRate":u32?,"mix":"Stereo|Mono|5.1|Adaptive"?,"dropFrame":bool?,"maxRenderQuality":bool?,"workingSpace":"rec709"|"rec2100-pq"|"rec2100-hlg"?,"wideGamut":bool?,"autoToneMap":bool?,"scaleMotion":bool=false}"#,
+            r#"{"width":u32?,"height":u32?,"fps":f64?,"pixelAspect":[num,den]?,"name":str?,"sampleRate":u32?,"mix":"Stereo|Mono|5.1|Adaptive"?,"dropFrame":bool?,"maxRenderQuality":bool?,"workingSpace":"rec709"|"rec2100-pq"|"rec2100-hlg"?,"wideGamut":bool?,"autoToneMap":bool?,"scaleMotion":bool=false}"#,
             has_seq,
             |s, p| {
                 const CMD: &str = "sequence.settings";
@@ -2228,6 +2242,7 @@ fn build() -> Vec<CommandSpec> {
                     Some(w) => Some(filmcraft_color::WorkingSpace::parse(w).ok_or_else(|| bad(CMD, format!("unknown working space `{w}`")))?),
                     None => None,
                 };
+                let par = pixel_aspect_param(p, CMD)?;
                 let drop_frame = bool_p(p, "dropFrame");
                 let rate = fps.or_else(|| s.active_sequence().map(|q| q.settings.frame_rate)).unwrap_or(FrameRate::FPS_23_976);
                 if drop_frame == Some(true) && !rate.supports_drop_frame() {
@@ -2249,6 +2264,9 @@ fn build() -> Vec<CommandSpec> {
                     }
                     if let Some(f) = fps {
                         q.settings.frame_rate = f;
+                    }
+                    if let Some(par) = par {
+                        q.settings.par = par;
                     }
                     if let Some(sr) = checked_u32_p(&p, "sampleRate", CMD)? {
                         q.settings.sample_rate = sr;

@@ -339,7 +339,7 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// `[num, den]` as a pixel aspect ratio FilmCraft can use ([`filmcraft_project::checked_par`]).
-fn pixel_aspect_p(v: &Value) -> Option<(u32, u32)> {
+pub(crate) fn pixel_aspect_p(v: &Value) -> Option<(u32, u32)> {
     let [n, d] = v.as_array()?.as_slice() else { return None };
     let (n, d) = (u32::try_from(n.as_u64()?).ok()?, u32::try_from(d.as_u64()?).ok()?);
     filmcraft_project::checked_par((n, d))

@@ -156,8 +156,18 @@ no media outside its range, so there a kept In is moved to the subclip's first o
 the result's `sourceInClamped: [ids]` (present with `keepSourceIn`) names the clips it was moved for.
 
 **Colour** (`crates/engine/src/color.rs`): `sequence.colorSettings {workingSpace: rec709|rec2100-pq|
-rec2100-hlg, wideGamut, autoToneMap}`, `clip.interpretFootage {items?, colorSpace?: auto|<id>, pixelAspect?: [num, den]|file}`,
-`color.spaces`, `media.colorInfo {item}`; LUTs: `lut.import {path, name?}`, `lut.list`,
+rec2100-hlg, wideGamut, autoToneMap}`, `clip.interpretFootage {items?, colorSpace?: auto|<id>, pixelAspect?: [num, den]|file}`
+(the named ratios are `filmcraft_project::STANDARD_PIXEL_ASPECTS`; the dialog's ids are
+`colorDialog.par.file` and `colorDialog.par.<num>x<den>`), `color.spaces`, `media.colorInfo {item}`
+(also `pixelAspect`, `pixelAspectOverride`, `pixelAspectLabel`). Sequences: `file.newSequence
+{preset?: <name>, …}` takes a named preset and `sequence.presets` lists them (`{group, name, width,
+height, fps, fpsNum, fpsDen, pixelAspect}`); the New Sequence dialog's ids are
+`sequenceSettings.tab.presets`, `sequenceSettings.presetGroup.<group>` and
+`sequenceSettings.preset.<name>`. `sequence.settings {pixelAspect: [num, den]}` and
+`file.newSequence {pixelAspect}` set the sequence's pixel aspect ratio (stored in lowest terms, at
+most 8:1 either way; one undo step); Sequence Settings' list is `sequenceSettings.par` with
+`sequenceSettings.par.option.<num>x<den>` and `.option.custom`, Custom's numbers
+`sequenceSettings.par.num` / `.par.den`. LUTs: `lut.import {path, name?}`, `lut.list`,
 `lut.remove {id}`, `lut.export {lut, path, format?}`, `lumetri.setInputLut` / `lumetri.setLook
 {clip?, lut: lib:<id>|builtin:<id>|"", path?}`, `lumetri.setSection {clip?, section, on?}`,
 `lumetri.applyMatch {clip?, referenceTime|referenceFrame|referenceTimecode, faceDetection?}`. Without

@@ -877,8 +877,11 @@ pub struct SequenceSettingsDraft {
     pub fps_den: i64,
     pub width: u32,
     pub height: u32,
-    /// New Sequence: the pixel aspect ratio the chosen preset gives the sequence.
+    /// The pixel aspect ratio: Sequence Settings starts from the sequence's, New Sequence from the
+    /// chosen preset's; both send it when it changed (`pixelAspect`).
     pub par: (u32, u32),
+    /// The Pixel Aspect Ratio list is on Custom: the ratio is typed as two numbers.
+    pub par_custom: bool,
     /// New Sequence: the name of the chosen preset (`sequence.presets`), sent as `preset`; empty
     /// when none was chosen.
     pub preset: String,
@@ -905,6 +908,7 @@ impl Default for SequenceSettingsDraft {
             width: 1920,
             height: 1080,
             par: (1, 1),
+            par_custom: false,
             preset: String::new(),
             scale_motion: true,
             drop_frame: false,
