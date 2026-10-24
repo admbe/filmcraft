@@ -162,4 +162,7 @@ fn probe_place_353() {
     let t0 = std::time::Instant::now();
     s.execute("file.newSequence", json!({"fromItems": many})).unwrap();
     println!("file.newSequence fromItems 353: {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+    let t0 = std::time::Instant::now();
+    let r = s.execute("file.newSequenceFromClip", json!({"items": many})).unwrap();
+    println!("file.newSequenceFromClip 353: {:.0} ms ({} clips)", t0.elapsed().as_secs_f64() * 1e3, r["clips"].as_array().map_or(0, Vec::len));
 }

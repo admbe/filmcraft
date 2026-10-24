@@ -1252,6 +1252,45 @@ fn apply_item(p: &mut Project, st: &mut crate::EditorState, plan: &ItemPlan, how
     Ok(ids)
 }
 
+/// Place `items`, each with its source range, back to back from `at` on `vdest` / `adest`, in one
+/// edit labelled `label`. `None` when one of them is placed as its clips (a nested sequence with
+/// the nest toggle off): the caller places them one by one then.
+#[allow(clippy::type_complexity)]
+pub(crate) fn place_ranges_in_one_edit(
+    s: &mut Session,
+    items: &[(ItemId, TimeRange)],
+    at: Tick,
+    vdest: Option<TrackId>,
+    adest: Option<TrackId>,
+    label: &str,
+) -> Option<Result<Vec<ClipId>>> {
+    if items.iter().any(|(i, _)| places_as_clips(s, *i)) {
+        return None;
+    }
+    Some((|| {
+        let plans = items.iter().map(|(i, r)| plan_item(s, *i, vdest, adest, label).map(|p| (p, *r))).collect::<Result<Vec<_>>>()?;
+        let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+        let media = s.media.clone();
+        let scaling = s.prefs.media.default_media_scaling.clone();
+        let snapshot = s.project.clone();
+        s.edit(label, |p, st| {
+            let mut at = at;
+            let mut all = Vec::new();
+            for (plan, range) in &plans {
+                let how =
+                    Placement { range: *range, at, insert: false, label, audio_split: None, seq_id, media: &media, scaling: &scaling, snapshot: &snapshot };
+                let clips = apply_item(p, st, plan, how)?;
+                if let Some(end) = p.sequence(seq_id).and_then(|q| clips.iter().filter_map(|c| q.find_item(*c).map(|(_, i)| i.end())).max()) {
+                    at = end;
+                }
+                all.extend(clips);
+            }
+            st.selection = all.clone();
+            Ok(all)
+        })
+    })())
+}
+
 /// `timeline.place` with `items` in one edit: each item where the one before it ends.
 fn place_items_in_one_edit(s: &mut Session, p: &Value, ids: &[ItemId], at: Tick) -> Result<Value> {
     let mut plans = Vec::with_capacity(ids.len());
