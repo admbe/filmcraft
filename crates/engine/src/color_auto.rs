@@ -84,7 +84,7 @@ fn config(p: &Value) -> Result<Config> {
 
 /// The timeline clips to correct: `clips` / `clip`, else every video clip of the active sequence
 /// whose media is one of `items` (subclips and the Project panel selection count), else the
-/// timeline selection.
+/// timeline selection's video clips.
 fn targets(s: &Session, p: &Value) -> Result<Vec<ClipId>> {
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
     if let Some(a) = p.get("clips").and_then(Value::as_array) {
@@ -117,10 +117,13 @@ fn targets(s: &Session, p: &Value) -> Result<Vec<ClipId>> {
         }
         return Ok(v);
     }
-    if s.state.selection.is_empty() {
+    // the selection's video clips: a linked clip's audio partner is selected with it
+    let video: Vec<ClipId> =
+        s.state.selection.iter().copied().filter(|c| q.find_item(*c).is_some_and(|(t, _)| q.track(t).is_some_and(|t| t.kind == TrackKind::Video))).collect();
+    if video.is_empty() {
         return Err(bad(CMD, "select video clips, or pass `clips` or `items`"));
     }
-    Ok(s.state.selection.clone())
+    Ok(video)
 }
 
 fn auto(s: &mut Session, p: &Value) -> Result<Value> {

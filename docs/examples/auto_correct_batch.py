@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Import a folder of clips, auto-correct every clip, export with a named preset.
 
-Drives a running FilmCraft over its control channel (start it with `filmcraft --control 9876`).
+Drives a running FilmCraft over its control channel (start it with `filmcraft --control 9876`), from
+an environment with the same FILMCRAFT_CONTROL_TOKEN as the app (docs/control-protocol.md).
 See docs/color.md for what `lumetri.auto` measures and reports.
 
     python docs/examples/auto_correct_batch.py footage/card01 out/reel.mp4 \
@@ -15,6 +16,7 @@ request timeout, so the script never waits inside a request).
 
 import argparse
 import json
+import os
 import pathlib
 import socket
 import sys
@@ -22,13 +24,17 @@ import time
 
 
 def connect(port):
+    # every request carries the token the app was started with
+    token = os.environ.get("FILMCRAFT_CONTROL_TOKEN")
+    if not token:
+        sys.exit("FILMCRAFT_CONTROL_TOKEN is not set: export the token FilmCraft was started with (docs/control-protocol.md)")
     sock = socket.create_connection(("127.0.0.1", port))
     stream = sock.makefile("rw", encoding="utf-8")
     counter = [0]
 
     def call(method, **params):
         counter[0] += 1
-        stream.write(json.dumps({"id": counter[0], "method": method, "params": params}) + "\n")
+        stream.write(json.dumps({"id": counter[0], "token": token, "method": method, "params": params}) + "\n")
         stream.flush()
         reply = json.loads(stream.readline())
         if not reply.get("ok"):
@@ -85,6 +91,12 @@ def main():
             note = f"  ({it['note']})" if it.get("note") else ""
             print(f"clip {it['clip']}: set {json.dumps(it.get('set'))}{note}")
         print(f"corrected {result['corrected']} clip(s), left {len(measured['items']) - len(good)} under confidence {args.min_confidence}")
+        # a clip that failed would be exported uncorrected: report it and stop before the export
+        errors = result.get("errors") or []
+        for e in errors:
+            print(f"clip {e.get('clip')}: not corrected: {e.get('error')}", file=sys.stderr)
+        if errors:
+            sys.exit(f"{len(errors)} clip(s) could not be corrected; not exporting")
     else:
         print("no clip reached the confidence threshold; nothing changed")
 

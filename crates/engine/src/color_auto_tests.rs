@@ -188,6 +188,22 @@ fn clips_without_video_and_hostile_params_error_cleanly() {
 }
 
 #[test]
+fn the_timeline_selection_counts_only_its_video_clips() {
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let audio = s.active_sequence().unwrap().audio_tracks[0].items[0].id;
+    // a linked A/V selection: the audio partner is left out, not reported as an error
+    s.state.selection = vec![clip, audio];
+    let r = s.execute("lumetri.auto", json!({})).unwrap();
+    assert_eq!((r["corrected"].as_u64(), r["errors"].as_array().map(Vec::len)), (Some(1), Some(0)), "{r}");
+    assert_eq!(r["items"][0]["clip"], clip.0, "{r}");
+    // only audio selected: the same error as an empty selection
+    s.state.selection = vec![audio];
+    let e = s.execute("lumetri.auto", json!({})).err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(e.contains("select video clips"), "{e}");
+}
+
+#[test]
 fn the_command_is_in_the_color_menu_and_the_registry() {
     let spec = crate::find_command("lumetri.auto").expect("registered");
     assert_eq!((spec.label, spec.menu), ("Auto Correct", &["Color"][..]));

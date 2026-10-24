@@ -114,7 +114,8 @@ percentiles after the white balance and before the exposure change.
 
 ## Batch: import a folder, auto-correct every clip, export
 
-Over the control channel (`filmcraft --control 9876`; the same calls work through the MCP tools
+Over the control channel (`filmcraft --control 9876`, with `FILMCRAFT_CONTROL_TOKEN` set as
+[control-protocol.md](control-protocol.md) describes; the same calls work through the MCP tools
 `command_run` / `command_batch` and `filmcraft-cli run`). The script below is
 [docs/examples/auto_correct_batch.py](examples/auto_correct_batch.py):
 
@@ -131,14 +132,15 @@ wait}`; `export.presets.list` names the presets) and waits for the job in `jobs.
 export outlives the control channel's one-minute request timeout.
 
 ```python
-import json, socket, sys, time, pathlib
+import json, os, socket, sys, time, pathlib
 
 def connect(port=9876):
+    token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or sys.exit("set FILMCRAFT_CONTROL_TOKEN")
     s = socket.create_connection(("127.0.0.1", port)); f = s.makefile("rw", encoding="utf-8")
     n = [0]
     def call(method, **params):
         n[0] += 1
-        f.write(json.dumps({"id": n[0], "method": method, "params": params}) + "\n"); f.flush()
+        f.write(json.dumps({"id": n[0], "token": token, "method": method, "params": params}) + "\n"); f.flush()
         r = json.loads(f.readline())
         if not r.get("ok"):
             raise RuntimeError(f"{method}: {r.get('error')}")
