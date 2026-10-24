@@ -435,7 +435,7 @@ fn a_refused_reader_thread_leaves_nothing_in_progress() {
     assert!(!scanning && !volumes.is_empty(), "{volumes:?}");
 }
 
-/// A file system whose `/Volumes/Dead` share never answers until released.
+/// A file system whose `/Volumes/Dead` share and `/Dead…` drives never answer until released.
 struct DeadShare {
     fs: FakeFs,
     released: std::sync::atomic::AtomicBool,
@@ -452,7 +452,7 @@ impl Services for DeadShare {
         self.fs.file_size(path)
     }
     fn list_entries(&self, dir: &str) -> Option<std::io::Result<Vec<DirEntry>>> {
-        while dir.starts_with("/Volumes/Dead") && !self.released.load(std::sync::atomic::Ordering::Relaxed) {
+        while (dir.starts_with("/Volumes/Dead") || dir.starts_with("/Dead")) && !self.released.load(std::sync::atomic::Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         self.fs.list_entries(dir)
@@ -482,6 +482,23 @@ fn a_dead_share_cannot_take_every_read() {
     assert!(matches!(local, media_browser::Listing::Ready(_)), "a local folder is read: {local:?}");
 }
 
+/// Several dead shares together, each holding its share of the reads, still leave a read for a
+/// drive that has none going.
+#[test]
+fn dead_shares_together_cannot_take_every_read() {
+    let fs = Arc::new(DeadShare { fs: FakeFs::new(), released: Default::default() });
+    let s = Session::new(fs.clone());
+    let services = s.services.clone();
+    for share in ["A", "B", "C", "D", "E", "F"] {
+        for n in 0..5 {
+            let _ = s.browser.io.listing(&services, &format!("/Dead{share}/Day{n}"), "all");
+        }
+    }
+    let local = s.browser.io.read(&services, "/home/me/Movies", "all", std::time::Duration::from_secs(5));
+    fs.released.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(matches!(local, media_browser::Listing::Ready(_)), "a local folder is read: {local:?}");
+}
+
 /// `read` asks for a folder as it is now: while that read is still going, the answer is pending,
 /// not the listing from a moment ago.
 #[test]
@@ -493,6 +510,27 @@ fn a_fresh_read_still_going_is_pending() {
     assert!(matches!(s.browser.io.read(&services, "/home/me/Movies", "all", wait), media_browser::Listing::Ready(_)));
     let again = s.browser.io.read(&services, "/home/me/Movies", "all", std::time::Duration::from_millis(20));
     assert!(matches!(again, media_browser::Listing::Pending), "{again:?}");
+    // a second fresh read while that one is going does not get the old listing either
+    let overlapping = s.browser.io.read(&services, "/home/me/Movies", "all", std::time::Duration::from_millis(20));
+    assert!(matches!(overlapping, media_browser::Listing::Pending), "{overlapping:?}");
     // the panel's listing keeps showing the last one meanwhile
     assert!(matches!(s.browser.io.listing(&services, "/home/me/Movies", "all"), media_browser::Listing::Ready(_)));
+}
+
+/// Going to a folder already listed reads it again: until that read is done the answer carries
+/// the last entries and says they are pending, instead of passing them off as current.
+#[test]
+fn navigating_to_a_folder_being_read_again_says_pending() {
+    let delay = std::time::Duration::from_millis(400);
+    let mut s = Session::new(Arc::new(SlowFs { fs: FakeFs::new(), delay, reads: Default::default() }));
+    s.execute("mediaBrowser.navigate", json!({"path": "/home/me/Movies"})).unwrap();
+    std::thread::sleep(delay + std::time::Duration::from_millis(300));
+    s.execute("mediaBrowser.navigate", json!({"path": "/home/me"})).unwrap();
+    std::thread::sleep(delay + std::time::Duration::from_millis(300));
+    let out = s.execute("mediaBrowser.navigate", json!({"path": "/home/me/Movies"})).unwrap();
+    assert_eq!(out["pending"], true, "{out}");
+    assert!(out["entries"].as_array().is_some_and(|e| !e.is_empty()), "the last entries are kept: {out}");
+    std::thread::sleep(delay + std::time::Duration::from_millis(300));
+    let out = s.execute("mediaBrowser.navigate", json!({"back": true})).unwrap();
+    assert_eq!(out["dir"], "/home/me", "{out}");
 }

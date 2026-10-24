@@ -299,10 +299,12 @@ impl BrowserIo {
     const VOLUMES_FRESH: std::time::Duration = std::time::Duration::from_secs(10);
     const LIST_FRESH: std::time::Duration = std::time::Duration::from_secs(3);
     /// Reads at once: a dead share holds its thread until the OS gives up, and no more are
-    /// started past this many in all, nor past [`Self::MAX_READS_PER_ROOT`] on one drive or share,
-    /// so a few dead shares never keep a local folder from being read.
+    /// started past this many in all, nor past [`Self::MAX_READS_PER_ROOT`] on one drive or share.
+    /// A drive or share with no read going may still start one up to [`Self::MAX_READS_HARD`], so
+    /// dead shares never keep another folder (a local one) from being read.
     const MAX_READS: usize = 16;
     const MAX_READS_PER_ROOT: usize = 4;
+    const MAX_READS_HARD: usize = 32;
     const MAX_LISTS: usize = 512;
 
     fn state(&self) -> std::sync::MutexGuard<'_, IoState> {
@@ -347,6 +349,11 @@ impl BrowserIo {
         self.list(services, dir, filter, wait, true)
     }
 
+    /// Whether `dir` is being read (again) now.
+    pub fn is_reading(&self, dir: &str) -> bool {
+        self.state().reading.contains(dir)
+    }
+
     /// Mark every listing and the drives as old: they are read again when next asked for (the
     /// panel shows the old ones meanwhile).
     pub fn expire(&self) {
@@ -373,7 +380,9 @@ impl BrowserIo {
             let volumes = st.volumes.as_ref().map_or(&[][..], |(_, v)| v.as_slice());
             let root = read_root(dir, volumes);
             let on_root = st.reading.iter().filter(|d| read_root(d, volumes) == root).count();
-            let start = old && !st.reading.contains(&key) && st.reading.len() < Self::MAX_READS && on_root < Self::MAX_READS_PER_ROOT;
+            let room =
+                if on_root == 0 { st.reading.len() < Self::MAX_READS_HARD } else { st.reading.len() < Self::MAX_READS && on_root < Self::MAX_READS_PER_ROOT };
+            let start = old && !st.reading.contains(&key) && room;
             if start {
                 st.reading.insert(key.clone());
             }
@@ -404,9 +413,9 @@ impl BrowserIo {
         }
         let st = self.state();
         let listing = match st.lists.get(&key) {
-            // the last listing stands in while a fresh one is read, but not as the answer to a
-            // read asked for now (`read`): that one is pending until it is done
-            Some((_, l)) if !(fresh && start && st.reading.contains(&key)) => l.clone(),
+            // the last listing stands in while a fresh one is read, but a read asked for now
+            // (`read`) is answered only by the read it started, once that is done
+            Some((_, l)) if !fresh || (start && !st.reading.contains(&key)) => l.clone(),
             Some(_) | None => Listing::Pending,
         };
         match listing {
@@ -599,7 +608,13 @@ fn navigate(s: &mut Session, p: &Value) -> Result<Value> {
     out["dir"] = json!(dir);
     out["fileTypes"] = json!(filter);
     match listing {
-        Listing::Ready(entries) => out["entries"] = serde_json::to_value(&*entries).unwrap_or_default(),
+        Listing::Ready(entries) => {
+            out["entries"] = serde_json::to_value(&*entries).unwrap_or_default();
+            // the last listing while the folder is read again: say it may be out of date
+            if s.browser.io.is_reading(&dir) {
+                out["pending"] = json!(true);
+            }
+        }
         Listing::Pending => {
             out["entries"] = json!([]);
             out["pending"] = json!(true);
