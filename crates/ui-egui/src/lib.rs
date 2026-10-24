@@ -1373,7 +1373,8 @@ impl FilmcraftApp {
                         return Ok(Value::Null);
                     }
                     let bin = bin.unwrap_or_else(|| json!(app.import_bin().0));
-                    let r = app.session.execute("file.import", json!({"paths": paths, "bin": bin})).map_err(|e| e.to_string());
+                    // the files open in the background and appear as they do: the window keeps responding
+                    let r = app.session.execute("file.import", json!({"paths": paths, "bin": bin, "async": true})).map_err(|e| e.to_string());
                     if let Ok(v) = &r
                         && let Some(errs) = v.get("errors").and_then(Value::as_array)
                         && !errs.is_empty()
@@ -1489,7 +1490,10 @@ impl FilmcraftApp {
         }
         if !paths.is_empty() {
             let pointer = self.drop_pointer(ctx);
-            let imported = self.session.execute("file.import", json!({"paths": paths, "bin": self.import_bin().0}));
+            // Dropped on the timeline, the items are needed now to place them; anywhere else the
+            // files open in the background and appear as they do.
+            let to_timeline = pointer.is_some() && self.session.prefs.timeline.drop_import_to_timeline;
+            let imported = self.session.execute("file.import", json!({"paths": paths, "bin": self.import_bin().0, "async": !to_timeline}));
             if let Ok(v) = imported
                 && let Some(pos) = pointer
                 && self.session.prefs.timeline.drop_import_to_timeline

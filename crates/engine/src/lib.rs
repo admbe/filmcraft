@@ -12,6 +12,7 @@
 
 pub mod aaf_omf;
 pub mod autosave;
+pub mod background_import;
 pub mod captions;
 pub mod clip_ops;
 pub mod color;
@@ -447,6 +448,8 @@ pub struct Session {
     pub offline: relink::OfflineState,
     /// Proxy / ingest / project-manager jobs whose results still have to be applied to the project.
     pub media_jobs: Vec<proxies::PendingJob>,
+    /// Imports whose files are still opening in the background (`file.import {async: true}`).
+    pub background_imports: Vec<background_import::Pending>,
     /// Mask tracking jobs whose keyframes are still being written.
     pub mask_jobs: Vec<masks::PendingTrack>,
     /// Scene Edit Detection jobs whose results are applied when they finish.
@@ -553,6 +556,7 @@ impl Session {
             shortcuts: shortcuts::Shortcuts::new(),
             offline: Default::default(),
             media_jobs: Vec::new(),
+            background_imports: Vec::new(),
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
             presets: Default::default(),
@@ -647,6 +651,7 @@ impl Session {
     /// Apply worker notifications (call regularly, e.g. once per UI frame). Also applies the
     /// results of finished proxy / ingest jobs.
     pub fn poll_persistence(&mut self) {
+        background_import::poll(self);
         proxies::poll(self);
         masks::poll(self);
         scene_detect::poll(self);

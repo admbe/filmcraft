@@ -657,56 +657,103 @@ pub fn import_bytes(s: &mut Session, path: &str, bytes: std::sync::Arc<[u8]>, bi
 /// Import a media file through the host's random-access reader ([`crate::Services::reader`]):
 /// only the container index is read now (web `Blob`s are never copied whole for containers).
 /// A media file opened ahead of its import: its source and identity, or why either failed.
-type Prefetched = Result<(filmcraft_media::SharedSource, filmcraft_project::MediaIdentity)>;
+pub(crate) type Prefetched = Result<(filmcraft_media::SharedSource, filmcraft_project::MediaIdentity)>;
 
-/// Most media files opened at once by [`prefetch_sources`].
+/// Most media files opened at once by [`open_concurrently`].
 const PREFETCH_THREADS: usize = 8;
 
-/// Open the streamed media files among `paths` concurrently (at most [`PREFETCH_THREADS`] at
-/// once), for [`import_prefetched`]. One path, or a build without threads, opens nothing ahead.
-fn prefetch_sources(s: &Session, paths: &[String]) -> std::collections::HashMap<String, Prefetched> {
-    let mut out = std::collections::HashMap::new();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let todo: Vec<&String> =
-            paths.iter().filter(|p| filmcraft_media::is_importable(std::path::Path::new(p.as_str())) && s.services.reader(p).is_some()).collect();
-        if todo.len() < 2 {
-            return out;
+/// Open `paths` (streamed media files) several at a time, at most [`PREFETCH_THREADS`], handing
+/// each one's source and identity, or its error, to `done` as it finishes. Each open runs under
+/// `catch_unwind`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn open_concurrently(
+    media: &crate::media_pool::MediaPool,
+    services: &dyn crate::Services,
+    paths: &[String],
+    done: &(dyn Fn(&str, Prefetched) + Sync),
+) {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = PREFETCH_THREADS.min(std::thread::available_parallelism().map_or(2, |n| n.get())).min(paths.len()).max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(path) = paths.get(i) else { break };
+                    let one = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Prefetched {
+                        let identity = crate::relink::identity_of(services, path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+                        let src = media.open_file(path, services)?;
+                        Ok((src, identity))
+                    }))
+                    .unwrap_or_else(|_| Err(EngineError::Other(format!("{path}: internal error while opening (see the crash log)"))));
+                    done(path, one);
+                }
+            });
         }
-        let (media, services) = (&*s.media, &*s.services);
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let threads = PREFETCH_THREADS.min(std::thread::available_parallelism().map_or(2, |n| n.get())).min(todo.len()).max(1);
-        let results: Vec<Vec<(String, Prefetched)>> = std::thread::scope(|scope| {
-            let workers: Vec<_> = (0..threads)
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut mine = Vec::new();
-                        loop {
-                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(path) = todo.get(i) else { break };
-                            let one = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Prefetched {
-                                let identity = crate::relink::identity_of(services, path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-                                let src = media.open_file(path, services)?;
-                                Ok((src, identity))
-                            }))
-                            .unwrap_or_else(|_| Err(EngineError::Other(format!("{path}: internal error while opening (see the crash log)"))));
-                            mine.push(((*path).clone(), one));
-                        }
-                        mine
-                    })
-                })
-                .collect();
-            workers.into_iter().filter_map(|w| w.join().ok()).collect()
-        });
-        out.extend(results.into_iter().flatten());
+    });
+}
+/// Without threads (the web build) the files open one after another.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn open_concurrently(
+    media: &crate::media_pool::MediaPool,
+    services: &dyn crate::Services,
+    paths: &[String],
+    done: &(dyn Fn(&str, Prefetched) + Sync),
+) {
+    for path in paths {
+        let one = crate::relink::identity_of(services, path)
+            .map_err(|e| EngineError::Other(format!("{path}: {e}")))
+            .and_then(|identity| media.open_file(path, services).map(|src| (src, identity)).map_err(EngineError::from));
+        done(path, one);
     }
-    #[cfg(target_arch = "wasm32")]
-    let _ = (s, paths);
-    out
+}
+
+/// A media file `file.import` can open through the host's reader (no whole-file read).
+fn streamed_media(s: &Session, path: &str) -> bool {
+    filmcraft_media::is_importable(std::path::Path::new(path)) && s.services.reader(path).is_some()
+}
+
+/// Open the streamed media files among `paths` concurrently, for [`import_prefetched`]. One path,
+/// or a build without threads, opens nothing ahead.
+fn prefetch_sources(s: &Session, paths: &[String]) -> std::collections::HashMap<String, Prefetched> {
+    let todo: Vec<String> = paths.iter().filter(|p| streamed_media(s, p)).cloned().collect();
+    if todo.len() < 2 || cfg!(target_arch = "wasm32") {
+        return std::collections::HashMap::new();
+    }
+    let out = std::sync::Mutex::new(std::collections::HashMap::new());
+    open_concurrently(&s.media, &*s.services, &todo, &|path: &str, r: Prefetched| {
+        out.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_string(), r);
+    });
+    out.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Ingest and transcription for items an import added, and relinking what came back, as at the
+/// end of `file.import` (a background import runs them once its last file is added); the errors.
+pub(crate) fn after_import(s: &mut Session, items: &[ItemId]) -> Vec<String> {
+    let mut errors = Vec::new();
+    let ma = &s.prefs.media_analysis;
+    if ma.auto_transcribe && ma.auto_transcribe_scope == "allImported" && !items.is_empty() {
+        let audio: Vec<u64> = items.iter().filter(|i| s.project.item(**i).is_some_and(|it| it.has_audio())).map(|i| i.0).collect();
+        if !audio.is_empty() {
+            let r = crate::transcript::can_transcribe(s).map_err(EngineError::Other).and_then(|()| s.execute("transcript.generate", json!({"items": audio})));
+            if let Err(e) = r {
+                errors.push(format!("transcription: {e}"));
+            }
+        }
+    }
+    if let Err(e) = crate::proxies::ingest(s, items) {
+        errors.push(format!("ingest: {e}"));
+    }
+    let was_missing = s.offline.missing.clone();
+    crate::relink::refresh(s);
+    for item in was_missing.iter().filter(|i| !s.offline.missing.contains(i)) {
+        s.media.remove(*item);
+    }
+    errors
 }
 
 /// [`import_streamed`] with the file already opened by [`prefetch_sources`].
-fn import_prefetched(s: &mut Session, path: &str, pre: Prefetched, bin: Option<filmcraft_project::BinId>) -> Result<ItemId> {
+pub(crate) fn import_prefetched(s: &mut Session, path: &str, pre: Prefetched, bin: Option<filmcraft_project::BinId>) -> Result<ItemId> {
     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let (src, identity) = pre?;
     import_source(s, path, name, src, identity, bin)
@@ -1385,127 +1432,150 @@ fn build() -> Vec<CommandSpec> {
                 Ok(json!({"items": ids.iter().map(|i| i.0).collect::<Vec<_>>()}))
             }
         ),
-        cmd!("file.import", "Import…", ["File"], Some("Cmd+I"), r#"{"paths":[str],"bin":binId?,"imageSequence":bool?,"replace":bool?}"#, always, |s, p| {
-            let bin = u64_p(p, "bin").map(filmcraft_project::BinId);
-            let paths: Vec<String> = match p.get("paths").and_then(Value::as_array) {
-                Some(a) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
-                None => str_p(p, "path").map(|x| vec![x.to_string()]).unwrap_or_default(),
-            };
-            if paths.is_empty() {
-                return Err(bad("file.import", "need `paths`"));
-            }
-            if bool_p(p, "replace").unwrap_or(false) {
-                let name = s.project.name.clone();
-                s.execute("file.newProject", json!({ "name": name }))?;
-            }
-            let mut ids = Vec::new();
-            let mut errors = Vec::new();
-            let mut sequences = Vec::new();
-            let mut reports = Vec::new();
-            let mut image_sequences = Vec::new();
-            // Image Sequence: each path is the first frame of a numbered still sequence. With
-            // Settings ▸ Media ▸ Import image sequences on, a single numbered still is detected.
-            let as_sequence = p.get("imageSequence").and_then(Value::as_bool).unwrap_or(false);
-            let detect = !as_sequence && s.prefs.media.import_image_sequences && paths.len() == 1;
-            // Media files are opened (probed) several at a time before they are added in order:
-            // opening is the slow part (a slow decoder takes ~0.1 s to open a clip), and this
-            // command runs on the UI thread, so in a field report a card of 109 clips froze the
-            // window for 15 s.
-            let mut opened = if as_sequence { std::collections::HashMap::new() } else { prefetch_sources(s, &paths) };
-            for path in paths {
-                if as_sequence || (detect && detect_image_sequence(s, &path)) {
-                    match import_image_sequence(s, &path, bin) {
-                        Ok((id, frames, missing)) => {
-                            ids.push(id.0);
-                            image_sequences.push(json!({"item": id.0, "frames": frames, "missing": missing}));
-                        }
-                        Err(e) => errors.push(format!("{path}: {e}")),
-                    }
-                    continue;
+        cmd!(
+            "file.import",
+            "Import…",
+            ["File"],
+            Some("Cmd+I"),
+            r#"{"paths":[str],"bin":binId?,"imageSequence":bool?,"replace":bool?,"async":bool?}"#,
+            always,
+            |s, p| {
+                let bin = u64_p(p, "bin").map(filmcraft_project::BinId);
+                let paths: Vec<String> = match p.get("paths").and_then(Value::as_array) {
+                    Some(a) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+                    None => str_p(p, "path").map(|x| vec![x.to_string()]).unwrap_or_default(),
+                };
+                if paths.is_empty() {
+                    return Err(bad("file.import", "need `paths`"));
                 }
-                // Media files through the host's reader (no whole-file read) when it has one.
-                let streamed = filmcraft_media::is_importable(std::path::Path::new(&path)) && s.services.reader(&path).is_some();
-                let read = if streamed { Ok(Vec::new()) } else { s.services.read_file(&path) };
-                match read {
-                    Ok(_) if streamed => match match opened.remove(&path) {
-                        Some(pre) => import_prefetched(s, &path, pre, bin),
-                        None => import_streamed(s, &path, bin),
-                    } {
-                        Ok(id) => ids.push(id.0),
-                        Err(e) => errors.push(format!("{path}: {e}")),
-                    },
-                    Ok(b) => {
-                        if let Some(fmt) = crate::captions::detect(&path, &b) {
-                            match crate::captions::import(s, &path, &b, fmt, None) {
-                                Ok(r) => reports.push(r),
-                                Err(e) => errors.push(format!("{path}: {e}")),
+                if bool_p(p, "replace").unwrap_or(false) {
+                    let name = s.project.name.clone();
+                    s.execute("file.newProject", json!({ "name": name }))?;
+                }
+                let mut ids = Vec::new();
+                let mut errors = Vec::new();
+                let mut sequences = Vec::new();
+                let mut reports = Vec::new();
+                let mut image_sequences = Vec::new();
+                // Image Sequence: each path is the first frame of a numbered still sequence. With
+                // Settings ▸ Media ▸ Import image sequences on, a single numbered still is detected.
+                let as_sequence = p.get("imageSequence").and_then(Value::as_bool).unwrap_or(false);
+                let detect = !as_sequence && s.prefs.media.import_image_sequences && paths.len() == 1;
+                // Media files are opened (probed) several at a time before they are added in order:
+                // opening is the slow part (a slow decoder takes ~0.1 s to open a clip), and this
+                // command runs on the UI thread, so in a field report a card of 109 clips froze the
+                // window for 15 s.
+                // async: the media files open on a background thread and are added as they finish
+                // (`background_import`), so the window keeps responding; the rest imports now
+                let background = bool_p(p, "async").unwrap_or(false) && !as_sequence && !cfg!(target_arch = "wasm32");
+                let (later, paths): (Vec<String>, Vec<String>) = if background {
+                    paths.into_iter().partition(|path| streamed_media(s, path) && !(detect && detect_image_sequence(s, path)))
+                } else {
+                    (Vec::new(), paths)
+                };
+                let mut opened = if as_sequence { std::collections::HashMap::new() } else { prefetch_sources(s, &paths) };
+                for path in paths {
+                    if as_sequence || (detect && detect_image_sequence(s, &path)) {
+                        match import_image_sequence(s, &path, bin) {
+                            Ok((id, frames, missing)) => {
+                                ids.push(id.0);
+                                image_sequences.push(json!({"item": id.0, "frames": frames, "missing": missing}));
                             }
-                        } else if let Some(fmt) = crate::interchange::detect(&path, &b) {
-                            match crate::interchange::import(s, &path, &b, fmt) {
-                                Ok(r) => {
-                                    sequences.extend(r["sequences"].as_array().cloned().unwrap_or_default());
-                                    reports.push(r);
+                            Err(e) => errors.push(format!("{path}: {e}")),
+                        }
+                        continue;
+                    }
+                    // Media files through the host's reader (no whole-file read) when it has one.
+                    let streamed = filmcraft_media::is_importable(std::path::Path::new(&path)) && s.services.reader(&path).is_some();
+                    let read = if streamed { Ok(Vec::new()) } else { s.services.read_file(&path) };
+                    match read {
+                        Ok(_) if streamed => match match opened.remove(&path) {
+                            Some(pre) => import_prefetched(s, &path, pre, bin),
+                            None => import_streamed(s, &path, bin),
+                        } {
+                            Ok(id) => ids.push(id.0),
+                            Err(e) => errors.push(format!("{path}: {e}")),
+                        },
+                        Ok(b) => {
+                            if let Some(fmt) = crate::captions::detect(&path, &b) {
+                                match crate::captions::import(s, &path, &b, fmt, None) {
+                                    Ok(r) => reports.push(r),
+                                    Err(e) => errors.push(format!("{path}: {e}")),
                                 }
-                                Err(e) => errors.push(format!("{path}: {e}")),
-                            }
-                        } else {
-                            match import_bytes(s, &path, b.into(), bin) {
-                                Ok(id) => ids.push(id.0),
-                                Err(e) => errors.push(format!("{path}: {e}")),
+                            } else if let Some(fmt) = crate::interchange::detect(&path, &b) {
+                                match crate::interchange::import(s, &path, &b, fmt) {
+                                    Ok(r) => {
+                                        sequences.extend(r["sequences"].as_array().cloned().unwrap_or_default());
+                                        reports.push(r);
+                                    }
+                                    Err(e) => errors.push(format!("{path}: {e}")),
+                                }
+                            } else {
+                                match import_bytes(s, &path, b.into(), bin) {
+                                    Ok(id) => ids.push(id.0),
+                                    Err(e) => errors.push(format!("{path}: {e}")),
+                                }
                             }
                         }
-                    }
-                    Err(e) => errors.push(format!("{path}: {e}")),
-                }
-            }
-            if ids.is_empty() && sequences.is_empty() && reports.is_empty() && !errors.is_empty() {
-                return Err(EngineError::Other(errors.join("; ")));
-            }
-            // Project Settings ▸ Ingest: copy / transcode / create proxies
-            // (image sequences are many files: ingest copies and transcodes single files only)
-            let item_ids: Vec<ItemId> = ids.iter().filter(|i| !image_sequences.iter().any(|q| q["item"].as_u64() == Some(**i))).map(|i| ItemId(*i)).collect();
-            // Settings ▸ Media Analysis & Transcription ▸ Automatically transcribe clips
-            let ma = &s.prefs.media_analysis;
-            if ma.auto_transcribe && ma.auto_transcribe_scope == "allImported" && !ids.is_empty() {
-                let audio: Vec<u64> = ids.iter().copied().filter(|i| s.project.item(ItemId(*i)).is_some_and(|it| it.has_audio())).collect();
-                if !audio.is_empty() {
-                    // without speech-to-text the setting can't act: say so instead of importing
-                    // silently untranscribed (#89)
-                    let r = crate::transcript::can_transcribe(s)
-                        .map_err(EngineError::Other)
-                        .and_then(|()| s.execute("transcript.generate", json!({"items": audio})));
-                    if let Err(e) = r {
-                        errors.push(format!("transcription: {e}"));
+                        Err(e) => errors.push(format!("{path}: {e}")),
                     }
                 }
-            }
-            let ingest = match crate::proxies::ingest(s, &item_ids) {
-                Ok(v) => v,
-                Err(e) => {
-                    errors.push(format!("ingest: {e}"));
-                    Value::Null
+                let pending = if later.is_empty() { None } else { Some((later.len(), crate::background_import::start(s, later, bin)?)) };
+                if ids.is_empty() && sequences.is_empty() && reports.is_empty() && !errors.is_empty() && pending.is_none() {
+                    return Err(EngineError::Other(errors.join("; ")));
                 }
-            };
-            let mut out = if !ingest.is_null() {
-                json!({"items": ids, "sequences": sequences, "documents": reports, "errors": errors, "ingest": ingest})
-            } else if reports.is_empty() {
-                json!({"items": ids, "errors": errors})
-            } else {
-                json!({"items": ids, "sequences": sequences, "documents": reports, "errors": errors})
-            };
-            if !image_sequences.is_empty() {
-                out["imageSequences"] = json!(image_sequences);
+                // Project Settings ▸ Ingest: copy / transcode / create proxies
+                // (image sequences are many files: ingest copies and transcodes single files only)
+                let item_ids: Vec<ItemId> =
+                    ids.iter().filter(|i| !image_sequences.iter().any(|q| q["item"].as_u64() == Some(**i))).map(|i| ItemId(*i)).collect();
+                // Settings ▸ Media Analysis & Transcription ▸ Automatically transcribe clips
+                let ma = &s.prefs.media_analysis;
+                if ma.auto_transcribe && ma.auto_transcribe_scope == "allImported" && !ids.is_empty() {
+                    let audio: Vec<u64> = ids.iter().copied().filter(|i| s.project.item(ItemId(*i)).is_some_and(|it| it.has_audio())).collect();
+                    if !audio.is_empty() {
+                        // without speech-to-text the setting can't act: say so instead of importing
+                        // silently untranscribed (#89)
+                        let r = crate::transcript::can_transcribe(s)
+                            .map_err(EngineError::Other)
+                            .and_then(|()| s.execute("transcript.generate", json!({"items": audio})));
+                        if let Err(e) = r {
+                            errors.push(format!("transcription: {e}"));
+                        }
+                    }
+                }
+                let ingest = match crate::proxies::ingest(s, &item_ids) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        errors.push(format!("ingest: {e}"));
+                        Value::Null
+                    }
+                };
+                let mut out = if !ingest.is_null() {
+                    json!({"items": ids, "sequences": sequences, "documents": reports, "errors": errors, "ingest": ingest})
+                } else if reports.is_empty() {
+                    json!({"items": ids, "errors": errors})
+                } else {
+                    json!({"items": ids, "sequences": sequences, "documents": reports, "errors": errors})
+                };
+                if !image_sequences.is_empty() {
+                    out["imageSequences"] = json!(image_sequences);
+                }
+                if let Some((n, job)) = pending
+                    && let (Some(o), Value::Object(extra)) = (out.as_object_mut(), crate::background_import::describe(job, n))
+                {
+                    o.extend(extra);
+                }
+                // Newly imported files may resolve paths the project already listed as offline
+                // (issue #110): rebuild s.offline.missing so the "Media missing" badge clears, and drop
+                // the cached slate of every item that came back so the monitors show the file again.
+                let was_missing = s.offline.missing.clone();
+                crate::relink::refresh(s);
+                for item in was_missing.iter().filter(|i| !s.offline.missing.contains(i)) {
+                    s.media.remove(*item);
+                }
+                Ok(out)
             }
-            // Newly imported files may resolve paths the project already listed as offline
-            // (issue #110): rebuild s.offline.missing so the "Media missing" badge clears, and drop
-            // the cached slate of every item that came back so the monitors show the file again.
-            let was_missing = s.offline.missing.clone();
-            crate::relink::refresh(s);
-            for item in was_missing.iter().filter(|i| !s.offline.missing.contains(i)) {
-                s.media.remove(*item);
-            }
-            Ok(out)
-        }),
+        ),
         cmd!(
             "file.exportInterchange",
             "Export Interchange",

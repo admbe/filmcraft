@@ -176,6 +176,11 @@ fn with_drop_import_off_empty_timeline_does_not_create_a_sequence() {
     let mut h = empty_harness();
     h.state_mut().session.prefs.timeline.drop_import_to_timeline = false;
     drop_on_empty_timeline(&mut h, &still("drop_still_empty_pref_off.png"));
+    // not dropped onto the timeline: the file opens in the background and the frames add it
+    let started = std::time::Instant::now();
+    while h.state().session.project.items.is_empty() && started.elapsed() < std::time::Duration::from_secs(10) {
+        step(&mut h);
+    }
     assert_eq!(h.state().session.project.items.len(), 1, "imported to the bin only");
     assert!(h.state().session.active_sequence().is_none());
 }
@@ -186,6 +191,11 @@ fn with_drop_import_off_the_file_is_only_imported() {
     h.state_mut().session.prefs.timeline.drop_import_to_timeline = false;
     let items_before = h.state().session.project.items.len();
     drop_on_row(&mut h, "timeline.track.V1.target", &still("drop_still_pref_off.png"));
+    // not placed on the timeline: the file opens in the background and the frames add it
+    let started = std::time::Instant::now();
+    while h.state().session.project.items.len() == items_before && started.elapsed() < std::time::Duration::from_secs(10) {
+        step(&mut h);
+    }
     assert_eq!(h.state().session.project.items.len(), items_before + 1, "the still is imported to the bin");
     assert_eq!(clip_counts(&h), (0, 0), "status: {}", h.state().ui.status);
 }
