@@ -40,7 +40,7 @@ pub fn open_interpret(app: &mut FilmcraftApp, params: &Value) {
         .and_then(|it| it.as_media())
         .and_then(|m| m.interpret.par.and_then(filmcraft_project::checked_par))
         .map_or_else(|| "file".to_string(), |(n, d)| format!("{n}:{d}"));
-    app.ui.color_dialog = Some(ColorDialog::Interpret { items, color_space: current, pixel_aspect });
+    app.ui.color_dialog = Some(ColorDialog::Interpret { items, color_space: current, pixel_aspect, pixel_aspect_set: false });
 }
 
 /// The `[num, den]` of a dialog choice (`"num:den"`), None for "file" or anything else.
@@ -89,7 +89,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let mut apply: Option<(&'static str, Value)> = None;
     let mut close = false;
     match &mut d {
-        ColorDialog::Interpret { items, color_space, pixel_aspect } => {
+        ColorDialog::Interpret { items, color_space, pixel_aspect, pixel_aspect_set } => {
             let detected = items
                 .first()
                 .and_then(|i| app.session.execute("media.colorInfo", json!({"item": i})).ok())
@@ -110,6 +110,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     let file_label = crate::i18n::t(&filmcraft_project::pixel_aspect_label(from_file)).to_string();
                     if radio(app, ui, "colorDialog.par.file", pixel_aspect == "file", &tlf!("Use Pixel Aspect Ratio from File: {par}", par = file_label)) {
                         *pixel_aspect = "file".into();
+                        *pixel_aspect_set = true;
                     }
                     ui.label(tl!("Conform to:"));
                     // the anamorphic squeezes: a 1.33x lens exactly (133:100) and the 4:3 pixel apart
@@ -117,6 +118,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         let choice = format!("{num}:{den}");
                         if radio(app, ui, &format!("colorDialog.par.{num}x{den}"), *pixel_aspect == choice, crate::i18n::t(label)) {
                             *pixel_aspect = choice;
+                            *pixel_aspect_set = true;
                         }
                     }
                     if let Some(par) = par_choice(pixel_aspect)
@@ -142,11 +144,16 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     });
                     let (ok, cancel) = buttons(app, ui);
                     if ok {
-                        let par = match par_choice(pixel_aspect) {
-                            Some((num, den)) => json!([num, den]),
-                            None => json!("file"),
-                        };
-                        apply = Some(("clip.interpretFootage", json!({"items": items, "colorSpace": color_space, "pixelAspect": par})));
+                        let mut p = json!({"items": items, "colorSpace": color_space});
+                        // the first item's ratio goes to every item only when the user picked one;
+                        // left out, each item keeps its own override
+                        if *pixel_aspect_set {
+                            p["pixelAspect"] = match par_choice(pixel_aspect) {
+                                Some((num, den)) => json!([num, den]),
+                                None => json!("file"),
+                            };
+                        }
+                        apply = Some(("clip.interpretFootage", p));
                     }
                     close = ok || cancel;
                 });

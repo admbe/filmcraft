@@ -216,6 +216,31 @@ fn interpret_footage_and_sequence_color_dialogs_and_hdr_scopes() {
     assert_eq!(info["override"], Value::Null, "{info}");
 }
 
+/// With several items selected, OK after changing only the colour space keeps each item's own
+/// pixel aspect override; a pixel aspect the user picks still goes to every item.
+#[test]
+fn interpret_footage_keeps_each_items_pixel_aspect_unless_one_is_picked() {
+    let mut d = Driver::demo();
+    let media: Vec<u64> = d.app().session.project.items.iter().filter(|(_, it)| it.as_media().is_some()).map(|(id, _)| id.0).collect();
+    let (a, b) = (media[0], media[1]);
+    d.exec("clip.interpretFootage", json!({"items": [b], "pixelAspect": [2, 1]}));
+    d.exec("project.select", json!({"items": [a, b]}));
+    let par = |d: &mut Driver, i: u64| d.exec("media.colorInfo", json!({"item": i}))["pixelAspectOverride"].clone();
+    // the dialog shows the first item ("from file"); only the colour space changes
+    d.ok("ui.menu.invoke", json!({"id": "clip.interpretFootage"}));
+    d.frames(3);
+    d.click("colorDialog.space.slog3-sgamut3cine");
+    d.click("colorDialog.ok");
+    assert_eq!(d.exec("media.colorInfo", json!({"item": b}))["override"], "slog3-sgamut3cine");
+    assert_eq!((par(&mut d, a), par(&mut d, b)), (Value::Null, json!([2, 1])), "the second item keeps its 2:1 override");
+    // picking a ratio applies it to both
+    d.ok("ui.menu.invoke", json!({"id": "clip.interpretFootage"}));
+    d.frames(3);
+    d.click("colorDialog.par.4x3");
+    d.click("colorDialog.ok");
+    assert_eq!((par(&mut d, a), par(&mut d, b)), (json!([4, 3]), json!([4, 3])));
+}
+
 #[test]
 fn apply_match_from_the_color_wheels_section() {
     let mut d = Driver::demo();
