@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::Session;
 use filmcraft_project::{ItemId, ItemKind, ParamValue};
+use filmcraft_time::FrameRate;
 
 /// A 144 x 108 Color Matte (a 1440 x 1080 stand-in) whose pixels are `par`.
 fn matte(s: &mut Session, par: (u32, u32)) -> ItemId {
@@ -158,6 +159,43 @@ fn interpret_footage_pixel_aspect_wins_over_the_file_and_undoes() {
     }
     assert!(s.execute("clip.interpretFootage", json!({"items": [item.0]})).is_err(), "nothing to change");
     assert_eq!((s.revision, media(&s).interpret.par), (rev, Some((2, 1))));
+}
+
+/// New Sequence takes a named preset (`sequence.presets` lists them): 6K, UHD and DCI 4K at the
+/// common rates, and the 1.33x anamorphic 6K preset carries 4:3 pixels. Explicit parameters override
+/// the preset's picture, and a sequence that no longer matches is named by its picture.
+#[test]
+fn new_sequence_presets_name_6k_and_anamorphic_sequences() {
+    let mut s = Session::default();
+    let list = s.execute("sequence.presets", json!({})).unwrap();
+    let list = list.as_array().unwrap();
+    assert!(list.iter().any(|p| p["name"] == "6K 16:9 6048x3402 23.976" && p["width"] == 6048 && p["height"] == 3402), "{list:?}");
+    assert!(list.iter().any(|p| p["name"] == "UHD 2160p 59.94" && p["group"] == "UHD 4K"));
+    assert!(list.iter().any(|p| p["name"] == "DCI 4K 2160p 24" && p["width"] == 4096));
+    s.execute("file.newSequence", json!({"preset": "6K 16:9 6048x3402 59.94"})).unwrap();
+    let st = s.active_sequence().unwrap().settings.clone();
+    assert_eq!((st.width, st.height, st.frame_rate, st.par, st.preset.as_str()), (6048, 3402, FrameRate::FPS_59_94, (1, 1), "6K 16:9 6048x3402 59.94"));
+    assert!(st.drop_frame);
+    s.execute("file.newSequence", json!({"preset": "6K Anamorphic 1.33x 6048x3402 23.976"})).unwrap();
+    let st = s.active_sequence().unwrap().settings.clone();
+    assert_eq!((st.par, st.preset.as_str()), ((4, 3), "6K Anamorphic 1.33x 6048x3402 23.976"));
+    // a 4:3-pixel clip fills the anamorphic sequence edge to edge at 100 %
+    let item = matte(&mut s, (4, 3));
+    s.execute("source.open", json!({"item": item.0})).unwrap();
+    s.execute("playhead.set", json!({"seconds": 0.0})).unwrap();
+    let r = s.execute("source.overwrite", json!({})).unwrap();
+    let clip = filmcraft_project::ClipId(r["clips"][0].as_u64().unwrap());
+    assert_eq!(motion_scale(&s, clip), 100.0);
+    // explicit parameters win; the sequence is then named by its picture
+    s.execute("file.newSequence", json!({"preset": "UHD 2160p 23.976", "fps": 25})).unwrap();
+    let st = s.active_sequence().unwrap().settings.clone();
+    assert_eq!((st.width, st.height, st.frame_rate, st.preset.as_str()), (3840, 2160, FrameRate::FPS_25, "3840x2160 25"));
+    // hostile preset names are refused and make nothing
+    let n = s.project.sequences().count();
+    for bad in [json!("6K"), json!("HD 1080p 23.98"), json!(""), json!(6048), json!(["6K 16:9 6048x3402 59.94"])] {
+        assert!(s.execute("file.newSequence", json!({"preset": bad})).is_err(), "{bad}");
+    }
+    assert_eq!(s.project.sequences().count(), n);
 }
 
 #[test]

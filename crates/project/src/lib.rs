@@ -885,6 +885,98 @@ impl Default for SequenceSettings {
     }
 }
 
+/// A named sequence preset (File ▸ New ▸ Sequence ▸ Sequence Presets): a frame size, timebase and
+/// pixel aspect ratio under a group heading. Audio and colour settings stay at their defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SequencePreset {
+    pub group: &'static str,
+    pub name: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub frame_rate: FrameRate,
+    pub par: (u32, u32),
+}
+
+impl SequencePreset {
+    /// The settings this preset makes (the rest at their defaults).
+    pub fn settings(&self) -> SequenceSettings {
+        SequenceSettings {
+            width: self.width,
+            height: self.height,
+            frame_rate: self.frame_rate,
+            par: self.par,
+            drop_frame: self.frame_rate.supports_drop_frame(),
+            preset: self.name.to_string(),
+            ..SequenceSettings::default()
+        }
+    }
+    /// Whether `st` still has this preset's picture (size, timebase and pixel aspect ratio).
+    pub fn matches(&self, st: &SequenceSettings) -> bool {
+        (st.width, st.height, st.frame_rate, sane_par(st.par)) == (self.width, self.height, self.frame_rate, self.par)
+    }
+}
+
+const PRESET_RATES_HD: &[FrameRate] = &[
+    FrameRate::FPS_23_976,
+    FrameRate::FPS_24,
+    FrameRate::FPS_25,
+    FrameRate::FPS_29_97,
+    FrameRate::FPS_30,
+    FrameRate::FPS_50,
+    FrameRate::FPS_59_94,
+    FrameRate::FPS_60,
+];
+const PRESET_RATES_CINEMA: &[FrameRate] = &[FrameRate::FPS_23_976, FrameRate::FPS_24, FrameRate::FPS_25, FrameRate::FPS_29_97, FrameRate::FPS_30];
+const PRESET_RATES_HIGH_SPEED: &[FrameRate] = &[FrameRate::FPS_119_88, FrameRate::FPS_120];
+
+/// Group, name prefix, size, pixel aspect ratio and the rates a preset family comes in. The name
+/// of each preset is `"{prefix} {rate}"`.
+const PRESET_FAMILIES: &[(&str, &str, (u32, u32), (u32, u32), &[FrameRate])] = &[
+    ("HD", "HD 720p", (1280, 720), (1, 1), PRESET_RATES_HD),
+    ("HD", "HD 1080p", (1920, 1080), (1, 1), PRESET_RATES_HD),
+    ("UHD 4K", "UHD 2160p", (3840, 2160), (1, 1), PRESET_RATES_HD),
+    ("UHD 4K", "UHD 2160p", (3840, 2160), (1, 1), PRESET_RATES_HIGH_SPEED),
+    // the 4K high-speed mode of some 6K cameras (3984 x 2240 at 100 / 119.88 fps)
+    ("UHD 4K", "4K 3984x2240", (3984, 2240), (1, 1), &[FrameRate { num: 100, den: 1 }, FrameRate::FPS_119_88, FrameRate::FPS_120]),
+    ("DCI 4K", "DCI 4K 2160p", (4096, 2160), (1, 1), PRESET_RATES_HD),
+    ("DCI 4K", "DCI 4K 2160p", (4096, 2160), (1, 1), &[FrameRate::FPS_48]),
+    // 6K: a common 16:9 6K sensor (6048 x 3402), DCI 1.9:1 and full-frame 1.94:1
+    ("6K", "6K 16:9 6048x3402", (6048, 3402), (1, 1), PRESET_RATES_HD),
+    ("6K", "6K DCI 6144x3240", (6144, 3240), (1, 1), PRESET_RATES_CINEMA),
+    ("6K", "6K Full Frame 6144x3160", (6144, 3160), (1, 1), PRESET_RATES_CINEMA),
+    // a 1.33x anamorphic lens on the 16:9 sensor: 4:3 pixels, shown 2.37:1
+    ("6K", "6K Anamorphic 1.33x 6048x3402", (6048, 3402), (4, 3), PRESET_RATES_HD),
+];
+
+/// Every named sequence preset, grouped (HD, UHD 4K, DCI 4K, 6K) and in order; names are unique.
+pub fn sequence_presets() -> Vec<SequencePreset> {
+    let mut out = Vec::new();
+    for (group, prefix, (width, height), par, rates) in PRESET_FAMILIES {
+        for &frame_rate in rates.iter() {
+            // leaked once per process: the names are as static as the table they come from
+            let name: &'static str = Box::leak(format!("{prefix} {}", frame_rate.label()).into_boxed_str());
+            out.push(SequencePreset { group, name, width: *width, height: *height, frame_rate, par: *par });
+        }
+    }
+    out
+}
+
+/// The preset called `name` (exact), if any.
+pub fn sequence_preset(name: &str) -> Option<SequencePreset> {
+    sequence_presets_cached().iter().copied().find(|p| p.name == name)
+}
+
+/// The preset whose picture `st` has, if any (New Sequence shows its name as the editing mode).
+pub fn sequence_preset_of(st: &SequenceSettings) -> Option<SequencePreset> {
+    sequence_presets_cached().iter().copied().find(|p| p.matches(st))
+}
+
+/// [`sequence_presets`], built once.
+pub fn sequence_presets_cached() -> &'static [SequencePreset] {
+    static PRESETS: std::sync::OnceLock<Vec<SequencePreset>> = std::sync::OnceLock::new();
+    PRESETS.get_or_init(sequence_presets)
+}
+
 /// Largest frame side, in pixels.
 pub const MAX_FRAME_SIDE: u32 = 32_768;
 /// Largest frame area, in pixels (16384 x 16384: 16K and 16384 x 8192 panoramas fit).
@@ -2271,6 +2363,43 @@ mod tests {
         assert_eq!(conformed_size((1920, 1080), (1, 1), (4, 3)), (1440.0, 1080.0));
         assert_eq!(conformed_size((u32::MAX, u32::MAX), (8, 1), (1, 8)), (u32::MAX as f64 * 64.0, u32::MAX as f64));
         assert_eq!(conformed_size((1440, 1080), (0, 0), (u32::MAX, 1)), (1440.0, 1080.0));
+    }
+
+    #[test]
+    fn sequence_presets_are_unique_valid_and_looked_up_by_name() {
+        let presets = sequence_presets();
+        let mut names: Vec<&str> = presets.iter().map(|p| p.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), presets.len(), "preset names are unique");
+        for p in &presets {
+            let st = p.settings();
+            assert!(st.validate().is_ok(), "{}", p.name);
+            assert_eq!(st.preset, p.name);
+            assert!(p.matches(&st), "{}", p.name);
+            assert_eq!(sequence_preset(p.name), Some(*p), "{}", p.name);
+            assert_eq!(sequence_preset_of(&st), Some(*p), "{} is the first preset with its picture", p.name);
+        }
+        assert_eq!(sequence_preset("HD 1080p 23.976").map(|p| (p.width, p.height, p.frame_rate)), Some((1920, 1080, FrameRate::FPS_23_976)));
+        assert_eq!(sequence_preset_of(&SequenceSettings::default()).map(|p| p.name), Some("HD 1080p 23.976"), "the default settings are a preset");
+        let k6 = sequence_preset("6K 16:9 6048x3402 59.94").unwrap();
+        assert_eq!((k6.width, k6.height, k6.par, k6.group), (6048, 3402, (1, 1), "6K"));
+        assert!(k6.settings().drop_frame, "NTSC rates start on drop-frame timecode");
+        let ana = sequence_preset("6K Anamorphic 1.33x 6048x3402 23.976").unwrap();
+        assert_eq!(ana.par, (4, 3));
+        assert_eq!(conformed_size((ana.width, ana.height), ana.par, (1, 1)), (8064.0, 3402.0), "shown desqueezed, 2.37:1");
+        assert!(sequence_preset("6K DCI 6144x3240 24").is_some() && sequence_preset("6K Full Frame 6144x3160 25").is_some());
+        assert!(sequence_preset("UHD 2160p 119.88").is_some() && sequence_preset("4K 3984x2240 119.88").is_some());
+        assert!(sequence_preset("DCI 4K 2160p 48").is_some());
+        assert_eq!(sequence_preset("HD 1080p 23.98"), None, "names are exact");
+        assert_eq!(sequence_preset(""), None);
+        let groups: Vec<&str> = presets.iter().map(|p| p.group).fold(Vec::new(), |mut g, x| {
+            if g.last() != Some(&x) {
+                g.push(x);
+            }
+            g
+        });
+        assert_eq!(groups, ["HD", "UHD 4K", "DCI 4K", "6K"], "grouped, in order");
     }
 
     #[test]

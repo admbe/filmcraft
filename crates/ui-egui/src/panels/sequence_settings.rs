@@ -1,9 +1,11 @@
 //! Sequence ▸ Sequence Settings…, laid out as Premiere Pro's dialog: General, Color Management and
 //! VR Properties tabs, Cancel / OK.
 //!
-//! File ▸ New ▸ Sequence… opens the same dialog as New Sequence ([`open_new`]): the General tab
-//! starting from the default settings, and a Tracks tab with the number of video and audio
-//! tracks (`tracks.video`, `tracks.audio`); OK runs `file.newSequence`.
+//! File ▸ New ▸ Sequence… opens the same dialog as New Sequence ([`open_new`]): a Sequence Presets
+//! tab (the named presets of `sequence.presets`, grouped HD / UHD 4K / DCI 4K / 6K; choosing one
+//! sets the General tab's frame size, timebase and pixel aspect ratio, `preset.<name>`), the
+//! General tab starting from the default settings, and a Tracks tab with the number of video and
+//! audio tracks (`tracks.video`, `tracks.audio`); OK runs `file.newSequence`.
 //!
 //! What it changes (one `sequence.settings` command, one undo step): Timebase, Frame Size (with
 //! "Scale motion effects proportionally when changing frame size", on by default), drop-frame or
@@ -17,7 +19,8 @@
 //! Maximum Bit Depth, and the VR Properties tab. Composite in Linear Color is shown on and greyed:
 //! FilmCraft always composites in linear light.
 //!
-//! Automation ids (`sequenceSettings.` + …): `tab.general`, `tab.color`, `tab.vr`; General:
+//! Automation ids (`sequenceSettings.` + …): `tab.presets`, `tab.general`, `tab.tracks`, `tab.color`,
+//! `tab.vr`; Sequence Presets: `preset.<name>` (+ `presetGroup.<group>`); General:
 //! `name`, `editingMode`, `timebase` (+ `timebase.option.<num>/<den>` while open), `width`, `height`,
 //! `aspect`, `scaleMotion`, `par`, `fields`, `videoDisplay` (+ `videoDisplay.option.<df|ndf|tc>`),
 //! `channelFormat` (+ `channelFormat.option.<Stereo|Mono|5.1|Adaptive>`), `channels`, `sampleRate`
@@ -83,6 +86,8 @@ pub fn open(app: &mut FilmcraftApp) {
         fps_den: st.frame_rate.den,
         width: st.width,
         height: st.height,
+        par: st.par,
+        preset: String::new(),
         scale_motion: true,
         drop_frame: st.drop_frame && st.frame_rate.supports_drop_frame(),
         mix: mix_name(st.audio_master).into(),
@@ -101,7 +106,7 @@ pub fn open_new(app: &mut FilmcraftApp) {
     let st = SequenceSettings::default();
     let n = app.session.project.sequences().count() + 1;
     app.ui.sequence_settings = SequenceSettingsDraft {
-        tab: "general".into(),
+        tab: "presets".into(),
         new_sequence: true,
         video_tracks: 3,
         audio_tracks: 3,
@@ -109,6 +114,9 @@ pub fn open_new(app: &mut FilmcraftApp) {
         fps_den: st.frame_rate.den,
         width: st.width,
         height: st.height,
+        par: st.par,
+        // the defaults are the HD 1080p 23.976 preset
+        preset: filmcraft_project::sequence_preset_of(&st).map(|p| p.name.to_string()).unwrap_or_default(),
         scale_motion: true,
         drop_frame: st.drop_frame && st.frame_rate.supports_drop_frame(),
         mix: mix_name(st.audio_master).into(),
@@ -131,6 +139,10 @@ fn new_sequence_params(d: &SequenceSettingsDraft) -> (Map<String, Value>, Map<St
     if !name.is_empty() {
         p.insert("name".into(), json!(name));
     }
+    // the chosen preset first (it carries the pixel aspect ratio and the name); the picture after it
+    if !d.preset.is_empty() {
+        p.insert("preset".into(), json!(d.preset));
+    }
     p.insert("width".into(), json!(d.width));
     p.insert("height".into(), json!(d.height));
     p.insert("fps".into(), json!(rate(d).as_f64()));
@@ -138,11 +150,72 @@ fn new_sequence_params(d: &SequenceSettingsDraft) -> (Map<String, Value>, Map<St
     p.insert("mix".into(), json!(d.mix));
     p.insert("video".into(), json!(d.video_tracks.min(256)));
     p.insert("audio".into(), json!(d.audio_tracks.min(256)));
-    // what's left: only the settings `file.newSequence` has no parameter for
-    let after = SequenceSettings { frame_rate: rate(d), width: d.width, height: d.height, sample_rate: d.sample_rate, ..Default::default() };
+    // what's left: only the settings `file.newSequence` has no parameter for (a preset already
+    // brings its timecode format)
+    let base = filmcraft_project::sequence_preset(&d.preset).map(|p| p.settings()).unwrap_or_default();
+    let after = SequenceSettings { frame_rate: rate(d), width: d.width, height: d.height, sample_rate: d.sample_rate, ..base };
     let mut rest = changes(d, &after, name);
     rest.retain(|k, _| matches!(k.as_str(), "dropFrame" | "maxRenderQuality"));
     (p, rest)
+}
+
+/// The Sequence Presets tab of New Sequence: the named presets by group; choosing one sets the
+/// draft's frame size, timebase and pixel aspect ratio (the General tab shows them).
+fn presets(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, elems: &mut Elems) {
+    let presets = filmcraft_project::sequence_presets_cached();
+    let chosen_group = presets.iter().find(|p| p.name == d.preset).map(|p| p.group);
+    let mut groups: Vec<&str> = Vec::new();
+    for p in presets {
+        if !groups.contains(&p.group) {
+            groups.push(p.group);
+        }
+    }
+    ui.label(tl!("Available Presets:"));
+    for group in groups {
+        let open = chosen_group == Some(group);
+        let header = egui::CollapsingHeader::new(t(group)).id_salt(("seq-preset-group", group)).default_open(open).show(ui, |ui| {
+            for p in presets.iter().filter(|p| p.group == group) {
+                let r = ui.selectable_label(d.preset == p.name, p.name);
+                elems.push((format!("sequenceSettings.preset.{}", p.name), r.rect, p.name.to_string()));
+                if r.clicked() {
+                    d.preset = p.name.to_string();
+                    d.width = p.width;
+                    d.height = p.height;
+                    d.fps_num = p.frame_rate.num;
+                    d.fps_den = p.frame_rate.den;
+                    d.par = p.par;
+                    d.drop_frame = p.frame_rate.supports_drop_frame();
+                }
+            }
+        });
+        elems.push((format!("sequenceSettings.presetGroup.{group}"), header.header_response.rect, group.to_string()));
+    }
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(tl!("Preset Description")).strong());
+    match presets.iter().find(|p| p.name == d.preset) {
+        Some(p) => {
+            let (dw, _) = filmcraft_project::conformed_size((p.width, p.height), p.par, (1, 1));
+            let shown = if p.par == (1, 1) {
+                tlf!("{w} x {h}, {rate} fps, square pixels", w = p.width, h = p.height, rate = p.frame_rate.label())
+            } else {
+                tlf!(
+                    "{w} x {h}, {rate} fps, {par}; shown {dw} x {h} ({aspect})",
+                    w = p.width,
+                    h = p.height,
+                    rate = p.frame_rate.label(),
+                    par = filmcraft_project::pixel_aspect_label(p.par),
+                    dw = dw.round() as u64,
+                    aspect = aspect(dw.round().clamp(0.0, f64::from(u32::MAX)) as u32, p.height)
+                )
+            };
+            let r = ui.label(&shown);
+            elems.push(("sequenceSettings.presetDescription".into(), r.rect, shown));
+        }
+        None => {
+            let r = ui.label(tl!("Custom settings (see the General tab)"));
+            elems.push(("sequenceSettings.presetDescription".into(), r.rect, "Custom".into()));
+        }
+    }
 }
 
 /// The Tracks tab of New Sequence: how many video and audio tracks the sequence starts with.
@@ -202,13 +275,7 @@ fn timecode_formats(r: FrameRate) -> Vec<(&'static str, String)> {
 }
 
 fn par_label(par: (u32, u32)) -> String {
-    if par.0 == par.1 {
-        tl!("Square Pixels (1.0)").into()
-    } else if par.1 > 0 {
-        tlf!("Custom ({ratio})", ratio = format!("{:.4}", f64::from(par.0) / f64::from(par.1)))
-    } else {
-        tl!("Custom").into()
-    }
+    t(&filmcraft_project::pixel_aspect_label(par)).to_string()
 }
 
 /// The parameters for `sequence.settings` that differ from `cur` (and the sequence's name
@@ -302,7 +369,18 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
         let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(list_w));
         elems.push(("sequenceSettings.name".into(), r.rect, d.name.clone()));
     });
-    row(ui, label_w, "Editing Mode:", false, |ui| fixed_combo(ui, elems, "editingMode", "Custom", list_w, NOT_YET));
+    // the preset the picture still matches (New Sequence: the chosen one), else Custom
+    let picture =
+        SequenceSettings { width: d.width, height: d.height, frame_rate: rate(d), par: if d.new_sequence { d.par } else { cur.par }, ..Default::default() };
+    let mode = match filmcraft_project::sequence_preset_of(&picture) {
+        Some(p) if !d.new_sequence || d.preset == p.name || d.preset.is_empty() => p.name.to_string(),
+        Some(_) if d.new_sequence => {
+            filmcraft_project::sequence_preset(&d.preset).filter(|p| p.matches(&picture)).map_or("Custom".to_string(), |p| p.name.to_string())
+        }
+        _ => "Custom".to_string(),
+    };
+    let hint = if d.new_sequence { "Choose a preset on the Sequence Presets tab" } else { NOT_YET };
+    row(ui, label_w, "Editing Mode:", false, |ui| fixed_combo(ui, elems, "editingMode", &mode, list_w, hint));
     row(ui, label_w, "Timebase:", true, |ui| {
         let r = rate(d);
         let mut choices: Vec<(i64, i64)> = TIMEBASES.to_vec();
@@ -338,13 +416,16 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
             elems.push(("sequenceSettings.height".into(), h.rect, d.height.to_string()));
             ui.label(tl!("vertical"));
             // the display aspect: 1440 x 1080 with 4:3 pixels is 16:9
-            let a = aspect(display_width(d.width, d.height, cur.par), d.height);
+            let par = if d.new_sequence { d.par } else { cur.par };
+            let a = aspect(display_width(d.width, d.height, par), d.height);
             let ar = ui.label(&a);
             elems.push(("sequenceSettings.aspect".into(), ar.rect, a));
         });
         let r = ui.checkbox(&mut d.scale_motion, tl!("Scale motion effects proportionally when changing frame size"));
         elems.push(("sequenceSettings.scaleMotion".into(), r.rect, d.scale_motion.to_string()));
-        row(ui, label_w, "Pixel Aspect Ratio:", false, |ui| fixed_combo(ui, elems, "par", &par_label(cur.par), list_w, NOT_YET));
+        let par = if d.new_sequence { d.par } else { cur.par };
+        let par_hint = if d.new_sequence { "Set by the preset (Sequence Presets tab) or by New Sequence From Clip" } else { NOT_YET };
+        row(ui, label_w, "Pixel Aspect Ratio:", false, |ui| fixed_combo(ui, elems, "par", &par_label(par), list_w, par_hint));
         row(ui, label_w, "Fields:", false, |ui| fixed_combo(ui, elems, "fields", "No Fields (Progressive Scan)", list_w, NOT_YET));
         row(ui, label_w, "Display Format:", true, |ui| {
             let r = rate(d);
@@ -482,7 +563,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
     let max_h = ctx.content_rect().height() * 0.8;
     let title = if new_sequence { tl!("New Sequence") } else { tl!("Sequence Settings") };
     let tabs: &[(&str, &str)] = if new_sequence {
-        &[("general", "General"), ("tracks", "Tracks")]
+        &[("presets", "Sequence Presets"), ("general", "General"), ("tracks", "Tracks")]
     } else {
         &[("general", "General"), ("color", "Color Management"), ("vr", "VR Properties")]
     };
@@ -507,6 +588,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
             ui.separator();
             egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| match d.tab.as_str() {
                 "color" if !new_sequence => color(ui, &mut d, &mut elems),
+                "presets" if new_sequence => presets(ui, &mut d, &mut elems),
                 "tracks" if new_sequence => tracks(ui, &mut d, &mut elems),
                 "vr" if !new_sequence => vr(ui, &mut elems),
                 _ => general(ui, &mut d, &cur, audio_samples, &mut elems),
@@ -608,6 +690,18 @@ mod tests {
             json!({"name":"Shorts","width":1080,"height":1920,"fps":24_000.0/1001.0,"sampleRate":48_000,"mix":"Stereo","video":2,"audio":4})
         );
         assert!(rest.is_empty(), "everything else is the default: {rest:?}");
+        // a chosen preset travels first (the engine takes its pixel aspect ratio and name from it)
+        let d = SequenceSettingsDraft {
+            new_sequence: true,
+            preset: "6K Anamorphic 1.33x 6048x3402 23.976".into(),
+            width: 6048,
+            height: 3402,
+            par: (4, 3),
+            ..Default::default()
+        };
+        let (p, _) = new_sequence_params(&d);
+        assert_eq!(p["preset"], "6K Anamorphic 1.33x 6048x3402 23.976");
+        assert_eq!((p["width"].clone(), p["height"].clone()), (json!(6048), json!(3402)));
         // what file.newSequence has no parameter for follows on the new sequence; a blank name
         // lets the command name it
         let d = SequenceSettingsDraft {

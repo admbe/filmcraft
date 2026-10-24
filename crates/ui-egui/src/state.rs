@@ -877,6 +877,11 @@ pub struct SequenceSettingsDraft {
     pub fps_den: i64,
     pub width: u32,
     pub height: u32,
+    /// New Sequence: the pixel aspect ratio the chosen preset gives the sequence.
+    pub par: (u32, u32),
+    /// New Sequence: the name of the chosen preset (`sequence.presets`), sent as `preset`; empty
+    /// when none was chosen.
+    pub preset: String,
     pub scale_motion: bool,
     pub drop_frame: bool,
     pub mix: String,
@@ -899,6 +904,8 @@ impl Default for SequenceSettingsDraft {
             fps_den: 1001,
             width: 1920,
             height: 1080,
+            par: (1, 1),
+            preset: String::new(),
             scale_motion: true,
             drop_frame: false,
             mix: "Stereo".into(),

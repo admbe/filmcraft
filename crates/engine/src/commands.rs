@@ -1174,7 +1174,7 @@ fn build() -> Vec<CommandSpec> {
             "Sequence…",
             ["File", "New"],
             Some("Cmd+N"),
-            r#"{"name":str,"width":u32=1920,"height":u32=1080,"fps":f64=23.976,"sampleRate":u32=48000,"video":n=3,"audio":n=3,"mix":"Stereo|Mono|5.1|Adaptive"?,"trackType":"Standard|Mono|5.1|Adaptive"?,"fromItem":itemId?,"fromItems":[itemId]?}"#,
+            r#"{"name":str,"preset":str?,"width":u32=1920,"height":u32=1080,"fps":f64=23.976,"sampleRate":u32=48000,"video":n=3,"audio":n=3,"mix":"Stereo|Mono|5.1|Adaptive"?,"trackType":"Standard|Mono|5.1|Adaptive"?,"fromItem":itemId?,"fromItems":[itemId]?}"#,
             always,
             |s, p| s.edit_group("New Sequence", |s| {
                 // `fromItems` is `fromItem` for a list: the first sets the sequence, the rest follow it back to back
@@ -1191,6 +1191,20 @@ fn build() -> Vec<CommandSpec> {
                 let mut st = SequenceSettings::default();
                 if let Some(from) = from_ids.first().and_then(|i| s.project.item(*i)).and_then(|i| i.as_media()) {
                     st = default_seq_settings_for(from);
+                }
+                // a named preset (`sequence.presets`) sets the picture; explicit parameters then override it
+                let preset = match p.get("preset") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => {
+                        let name = v.as_str().ok_or_else(|| bad("file.newSequence", "`preset` must be a preset name (see sequence.presets)"))?;
+                        Some(
+                            filmcraft_project::sequence_preset(name)
+                                .ok_or_else(|| bad("file.newSequence", format!("unknown sequence preset `{name}` (see sequence.presets)")))?,
+                        )
+                    }
+                };
+                if let Some(preset) = preset {
+                    st = SequenceSettings { sample_rate: st.sample_rate, ..preset.settings() };
                 }
                 if let Some(w) = checked_u32_p(p, "width", "file.newSequence")? {
                     st.width = w;
@@ -1215,7 +1229,11 @@ fn build() -> Vec<CommandSpec> {
                     ),
                     None => None,
                 };
-                st.preset = format!("{}x{} {}", st.width, st.height, st.frame_rate.label());
+                // named after the preset it still matches, else by its picture
+                st.preset = match preset.filter(|pr| pr.matches(&st)) {
+                    Some(pr) => pr.name.to_string(),
+                    None => format!("{}x{} {}", st.width, st.height, st.frame_rate.label()),
+                };
                 st.validate().map_err(|e| bad("file.newSequence", e))?;
                 let nv = checked_u32_p(p, "video", "file.newSequence")?.unwrap_or(3);
                 let na = checked_u32_p(p, "audio", "file.newSequence")?.unwrap_or(3);
@@ -1253,6 +1271,17 @@ fn build() -> Vec<CommandSpec> {
                 Ok(json!({"sequence": id.0}))
             })
         ),
+        query!("sequence.presets", "List Sequence Presets", "{}", |_, _| {
+            Ok(Value::Array(
+                filmcraft_project::sequence_presets_cached()
+                    .iter()
+                    .map(|p| {
+                        json!({"group": p.group, "name": p.name, "width": p.width, "height": p.height, "fps": p.frame_rate.as_f64(),
+                               "fpsNum": p.frame_rate.num, "fpsDen": p.frame_rate.den, "pixelAspect": p.par})
+                    })
+                    .collect(),
+            ))
+        }),
         cmd!("file.newBin", "Bin", ["File", "New"], Some("Cmd+B"), r#"{"name":str,"parent":binId?}"#, always, |s, p| {
             let n = str_p(p, "name").unwrap_or("New Bin").to_string();
             let parent = u64_p(p, "parent").map(filmcraft_project::BinId);
