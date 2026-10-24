@@ -198,6 +198,108 @@ fn new_sequence_presets_name_6k_and_anamorphic_sequences() {
     assert_eq!(s.project.sequences().count(), n);
 }
 
+/// Where the picture of `clip` lands in its sequence: the frame-space box of its source corners.
+fn placed_box(s: &Session, clip: filmcraft_project::ClipId) -> (f64, f64, f64, f64) {
+    let q = s.active_sequence().unwrap();
+    let (_, it) = q.find_item(clip).unwrap();
+    let src = s.project.source_size(it.item).unwrap();
+    let m = filmcraft_render::motion_matrix(q, it, src, s.project.source_par(it.item), it.source_in);
+    let corners = [(0.0, 0.0), (f64::from(src.0), 0.0), (0.0, f64::from(src.1)), (f64::from(src.0), f64::from(src.1))]
+        .map(|(x, y)| m.apply(filmcraft_geom::Vec2::new(x, y)));
+    let xs = corners.map(|p| p.x);
+    let ys = corners.map(|p| p.y);
+    (
+        xs.iter().copied().fold(f64::MAX, f64::min),
+        ys.iter().copied().fold(f64::MAX, f64::min),
+        xs.iter().copied().fold(f64::MIN, f64::max),
+        ys.iter().copied().fold(f64::MIN, f64::max),
+    )
+}
+
+/// The desqueezed anamorphic workflow: a 6048 x 3402 clip with an exact 1.33x
+/// squeeze edited desqueezed in square pixels. Sequence From Clip with `desqueeze` makes an
+/// 8044 x 3402 square-pixel sequence (8043.84 rounded to the nearest even width), named after the
+/// desqueezed 6K preset, and the clip is scaled to fill it exactly: no bars, not even a hairline.
+#[test]
+fn a_desqueezed_sequence_from_clip_is_square_at_the_display_size_and_filled() {
+    let mut s = Session::default();
+    s.execute("file.newSequence", json!({"name": "Rate", "fps": 23.976})).unwrap();
+    let r = s.execute("file.newColorMatte", json!({"color": "#ff0000", "width": 6048, "height": 3402, "seconds": 2.0})).unwrap();
+    let item = ItemId(r["item"].as_u64().unwrap());
+    s.execute("clip.interpretFootage", json!({"items": [item.0], "pixelAspect": [133, 100]})).unwrap();
+    let r = s.execute("file.newSequenceFromClip", json!({"items": [item.0], "desqueeze": true})).unwrap();
+    assert_eq!(r["desqueezed"], true);
+    let st = s.project.sequence(ItemId(r["sequence"].as_u64().unwrap())).unwrap().settings.clone();
+    assert_eq!((st.width, st.height, st.par), (8044, 3402, (1, 1)));
+    assert_eq!(st.preset, "6K Anamorphic 1.33x desqueezed 8044x3402 23.976");
+    let clip = filmcraft_project::ClipId(r["clips"][0].as_u64().unwrap());
+    // scaled to fit the width (8044 / 8043.84), which also covers the height
+    assert!((motion_scale(&s, clip) - 8044.0 / (6048.0 * 1.33) * 100.0).abs() < 1e-9, "{}", motion_scale(&s, clip));
+    let (x0, y0, x1, y1) = placed_box(&s, clip);
+    assert!(x0 <= 1e-9 && y0 <= 1e-9 && x1 >= 8044.0 - 1e-9 && y1 >= 3402.0 - 1e-9, "covers the frame: {:?}", (x0, y0, x1, y1));
+    assert!(x0 > -0.01 && x1 < 8044.01 && y0 > -0.1 && y1 < 3402.1, "and crops less than a pixel: {:?}", (x0, y0, x1, y1));
+    // the same from New Sequence (the Project panel's New Desqueezed Sequence From Clip)
+    s.execute("file.newSequence", json!({"name": "Ana", "fromItem": item.0, "desqueeze": true})).unwrap();
+    assert_eq!(s.active_sequence().unwrap().settings.preset, "6K Anamorphic 1.33x desqueezed 8044x3402 23.976");
+    // without `desqueeze` the sequence keeps the clip's pixels (the squeezed way)
+    let r = s.execute("file.newSequenceFromClip", json!({"items": [item.0]})).unwrap();
+    assert_eq!(r["desqueezed"], false);
+    let st = s.active_sequence().unwrap().settings.clone();
+    assert_eq!((st.width, st.height, st.par), (6048, 3402, (133, 100)));
+    // the menu command: enabled for a squeezed clip only
+    s.execute("project.select", json!({"items": [item.0]})).unwrap();
+    let r = s.execute("file.newDesqueezedSequenceFromClip", json!({})).unwrap();
+    assert_eq!(s.project.sequence(ItemId(r["sequence"].as_u64().unwrap())).unwrap().settings.width, 8044);
+    let square = s.execute("file.newColorMatte", json!({"color": "#00ff00", "width": 64, "height": 36})).unwrap()["item"].as_u64().unwrap();
+    s.execute("project.select", json!({"items": [square]})).unwrap();
+    assert!(s.execute("file.newDesqueezedSequenceFromClip", json!({})).is_err(), "square pixels: nothing to desqueeze");
+    // with `desqueeze` a square clip makes its ordinary sequence
+    let r = s.execute("file.newSequenceFromClip", json!({"items": [square], "desqueeze": true})).unwrap();
+    assert_eq!((r["desqueezed"].clone(), s.active_sequence().unwrap().settings.width), (json!(false), 64));
+}
+
+/// A squeezed clip edited into a desqueezed preset sequence by hand fills it the same way, and the
+/// rendered frame is opaque to the very edge (a small stand-in: 603 x 34 at 1.33 shows 801.99 wide
+/// in an 802 x 34 frame, which at 100 % left the first and last columns partly transparent).
+#[test]
+fn a_squeezed_clip_fills_a_desqueezed_sequence_to_the_edge() {
+    let mut s = Session::default();
+    let r = s.execute("file.newColorMatte", json!({"color": "#ff0000", "width": 603, "height": 34, "seconds": 2.0})).unwrap();
+    let item = ItemId(r["item"].as_u64().unwrap());
+    s.execute("clip.interpretFootage", json!({"items": [item.0], "pixelAspect": [133, 100]})).unwrap();
+    assert_eq!(filmcraft_project::desqueezed_size((603, 34), (133, 100)), (802, 34));
+    s.execute("file.newSequence", json!({"name": "Desqueezed", "width": 802, "height": 34, "fps": 24})).unwrap();
+    s.execute("source.open", json!({"item": item.0})).unwrap();
+    s.execute("playhead.set", json!({"seconds": 0.0})).unwrap();
+    let r = s.execute("source.overwrite", json!({})).unwrap();
+    let clip = filmcraft_project::ClipId(r["clips"][0].as_u64().unwrap());
+    assert!((motion_scale(&s, clip) - 802.0 / (603.0 * 1.33) * 100.0).abs() < 1e-9);
+    s.execute("playhead.set", json!({"seconds": 0.5})).unwrap();
+    let img = s.render_program(1.0).unwrap();
+    for (x, y) in [(0, 0), (801, 0), (0, 33), (801, 33), (0, 17), (801, 17), (401, 17)] {
+        assert!(img.get(x, y)[3] > 0.999, "({x}, {y}) alpha {}", img.get(x, y)[3]);
+    }
+    // a picture a whole pixel or more off keeps the default scaling (100 %)
+    s.execute("file.newSequence", json!({"name": "Wider", "width": 804, "height": 34, "fps": 24})).unwrap();
+    s.execute("source.open", json!({"item": item.0})).unwrap();
+    let r = s.execute("source.overwrite", json!({})).unwrap();
+    assert_eq!(motion_scale(&s, filmcraft_project::ClipId(r["clips"][0].as_u64().unwrap())), 100.0);
+}
+
+/// A desqueezed size beyond the largest frame is refused and makes nothing.
+#[test]
+fn a_desqueeze_beyond_the_largest_frame_is_refused() {
+    let mut s = Session::default();
+    let item = matte(&mut s, (8, 1));
+    if let Some(ItemKind::Media(m)) = Arc::make_mut(&mut s.project).item_mut(item).map(|i| &mut i.kind) {
+        m.info.video.as_mut().unwrap().width = 30_000;
+    }
+    let n = s.project.sequences().count();
+    assert!(s.execute("file.newSequenceFromClip", json!({"items": [item.0], "desqueeze": true})).is_err());
+    assert!(s.execute("file.newSequence", json!({"fromItem": item.0, "desqueeze": true})).is_err());
+    assert_eq!(s.project.sequences().count(), n);
+}
+
 #[test]
 fn hostile_file_pixel_aspects_make_square_sequences() {
     for bad in [(0, 0), (0, 3), (4, 0), (u32::MAX, 1), (1, u32::MAX), (9, 1)] {

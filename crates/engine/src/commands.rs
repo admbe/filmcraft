@@ -630,6 +630,23 @@ pub fn trim_delta(s: &Session, clip: ClipId, edge: Edge, mode: TrimMode, delta: 
 /// Sequence settings matching a media clip (New Sequence From Clip, New Sequence from an item):
 /// its frame size, rate and pixel aspect ratio (Interpret Footage's, else the file's), so a
 /// 1440 x 1080 clip with 4:3 pixels makes a 1440 x 1080 sequence that displays 16:9.
+/// Make `st` (the settings of a sequence for a clip with non-square pixels) a square-pixel
+/// sequence at the clip's desqueezed size ([`filmcraft_project::desqueezed_size`]: a 6048 x 3402
+/// clip with an exact 1.33x squeeze makes 8044 x 3402), named after the preset it then matches.
+/// False, and `st` unchanged, when its pixels are already square.
+pub(crate) fn desqueeze_settings(st: &mut SequenceSettings) -> bool {
+    let par = filmcraft_project::sane_par(st.par);
+    if par == (1, 1) {
+        return false;
+    }
+    let (w, h) = filmcraft_project::desqueezed_size((st.width, st.height), par);
+    st.width = w;
+    st.height = h;
+    st.par = (1, 1);
+    st.preset = filmcraft_project::sequence_preset_of(st).map_or_else(|| format!("{w}x{h} {}", st.frame_rate.label()), |p| p.name.to_string());
+    true
+}
+
 /// The `pixelAspect` parameter: `[num, den]`, a usable ratio in lowest terms
 /// ([`filmcraft_project::checked_par`]), or `None` when it is absent or null.
 pub(crate) fn pixel_aspect_param(p: &Value, cmd: &str) -> Result<Option<(u32, u32)>> {
@@ -1006,6 +1023,7 @@ pub(crate) fn place_item(
     let media = s.media.clone();
     let scaling = s.prefs.media.default_media_scaling.clone();
     let is_media = matches!(pi.kind, ItemKind::Media(_) | ItemKind::Subclip { .. });
+    let is_nest = matches!(pi.kind, ItemKind::Sequence(_));
     s.edit(label, |p, st| {
         let seq = p.sequence(seq_id).ok_or(EngineError::NoSequence)?;
         let rate = seq.settings.frame_rate;
@@ -1021,7 +1039,11 @@ pub(crate) fn place_item(
             }
             // the picture's size at its display aspect, in sequence pixels
             let shown = filmcraft_project::conformed_size(src_size, src_par.unwrap_or(seq_par), seq_par);
-            if is_media && shown != (f64::from(frame.0), f64::from(frame.1)) {
+            let conformed = src_par.is_some_and(|p| filmcraft_project::sane_par(p) != filmcraft_project::sane_par(seq_par));
+            if (is_media || is_nest) && conformed && crate::settings::fill_subpixel_conform(&mut v, frame, shown) {
+                // a desqueezed picture that misses the frame by a fraction of a pixel (8043.84 in
+                // 8044) now fills it exactly: no hairline at the edges
+            } else if is_media && shown != (f64::from(frame.0), f64::from(frame.1)) {
                 crate::settings::apply_media_scaling(&mut v, &scaling, frame, shown);
             }
             placements.push((vdest, v));
@@ -1185,7 +1207,7 @@ fn build() -> Vec<CommandSpec> {
             "Sequence…",
             ["File", "New"],
             Some("Cmd+N"),
-            r#"{"name":str,"preset":str?,"width":u32=1920,"height":u32=1080,"fps":f64=23.976,"pixelAspect":[num,den]?,"sampleRate":u32=48000,"video":n=3,"audio":n=3,"mix":"Stereo|Mono|5.1|Adaptive"?,"trackType":"Standard|Mono|5.1|Adaptive"?,"fromItem":itemId?,"fromItems":[itemId]?}"#,
+            r#"{"name":str,"preset":str?,"width":u32=1920,"height":u32=1080,"fps":f64=23.976,"pixelAspect":[num,den]?,"desqueeze":bool=false,"sampleRate":u32=48000,"video":n=3,"audio":n=3,"mix":"Stereo|Mono|5.1|Adaptive"?,"trackType":"Standard|Mono|5.1|Adaptive"?,"fromItem":itemId?,"fromItems":[itemId]?}"#,
             always,
             |s, p| s.edit_group("New Sequence", |s| {
                 // `fromItems` is `fromItem` for a list: the first sets the sequence, the rest follow it back to back
@@ -1203,6 +1225,8 @@ fn build() -> Vec<CommandSpec> {
                 if let Some(from) = from_ids.first().and_then(|i| s.project.item(*i)).and_then(|i| i.as_media()) {
                     st = default_seq_settings_for(from);
                 }
+                // `desqueeze`: a clip with non-square pixels makes a square-pixel sequence at its display size
+                let desqueezed = bool_p(p, "desqueeze").unwrap_or(false) && desqueeze_settings(&mut st);
                 // a named preset (`sequence.presets`) sets the picture; explicit parameters then override it
                 let preset = match p.get("preset") {
                     None | Some(Value::Null) => None,
@@ -1243,8 +1267,9 @@ fn build() -> Vec<CommandSpec> {
                     ),
                     None => None,
                 };
-                // named after the preset it still matches, else by its picture
-                st.preset = match preset.filter(|pr| pr.matches(&st)) {
+                // named after the preset it still matches (a desqueezed clip's: the one its picture
+                // matches), else by its picture
+                st.preset = match preset.filter(|pr| pr.matches(&st)).or_else(|| filmcraft_project::sequence_preset_of(&st).filter(|_| desqueezed)) {
                     Some(pr) => pr.name.to_string(),
                     None => format!("{}x{} {}", st.width, st.height, st.frame_rate.label()),
                 };

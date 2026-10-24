@@ -167,7 +167,15 @@ height, fps, fpsNum, fpsDen, pixelAspect}`); the New Sequence dialog's ids are
 `file.newSequence {pixelAspect}` set the sequence's pixel aspect ratio (stored in lowest terms, at
 most 8:1 either way; one undo step); Sequence Settings' list is `sequenceSettings.par` with
 `sequenceSettings.par.option.<num>x<den>` and `.option.custom`, Custom's numbers
-`sequenceSettings.par.num` / `.par.den`. LUTs: `lut.import {path, name?}`, `lut.list`,
+`sequenceSettings.par.num` / `.par.den`. Anamorphic clips edit squeezed (Sequence From Clip keeps
+the clip's pixels) or desqueezed: `file.newSequenceFromClip {items?, desqueeze: true}` (menu File ▸
+New ▸ Desqueezed Sequence From Clip, `file.newDesqueezedSequenceFromClip`, enabled for a clip with
+non-square pixels) and `file.newSequence {fromItem, desqueeze: true}` (the Project panel's New
+Desqueezed Sequence From Clip) make a square-pixel sequence at the clip's display size, width x
+squeeze rounded to the nearest even width (6048 x 3402 at an exact 1.33 is 8044 x 3402, the
+`6K Anamorphic 1.33x desqueezed 8044x3402 <rate>` presets); the result's `desqueezed` says whether
+there was a squeeze. A clip whose display size misses the frame by less than a pixel is scaled to
+fill it exactly. LUTs: `lut.import {path, name?}`, `lut.list`,
 `lut.remove {id}`, `lut.export {lut, path, format?}`, `lumetri.setInputLut` / `lumetri.setLook
 {clip?, lut: lib:<id>|builtin:<id>|"", path?}`, `lumetri.setSection {clip?, section, on?}`,
 `lumetri.applyMatch {clip?, referenceTime|referenceFrame|referenceTimecode, faceDetection?}`. Without

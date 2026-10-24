@@ -928,6 +928,17 @@ const PRESET_RATES_HD: &[FrameRate] = &[
 ];
 const PRESET_RATES_CINEMA: &[FrameRate] = &[FrameRate::FPS_23_976, FrameRate::FPS_24, FrameRate::FPS_25, FrameRate::FPS_29_97, FrameRate::FPS_30];
 const PRESET_RATES_HIGH_SPEED: &[FrameRate] = &[FrameRate::FPS_119_88, FrameRate::FPS_120];
+const PRESET_RATES_ANAMORPHIC: &[FrameRate] = &[
+    FrameRate::FPS_23_976,
+    FrameRate::FPS_24,
+    FrameRate::FPS_25,
+    FrameRate::FPS_29_97,
+    FrameRate::FPS_30,
+    FrameRate::FPS_48,
+    FrameRate::FPS_50,
+    FrameRate::FPS_59_94,
+    FrameRate::FPS_60,
+];
 
 /// Group, name prefix, size, pixel aspect ratio and the rates a preset family comes in. The name
 /// of each preset is `"{prefix} {rate}"`.
@@ -944,8 +955,11 @@ const PRESET_FAMILIES: &[(&str, &str, (u32, u32), (u32, u32), &[FrameRate])] = &
     ("6K", "6K 16:9 6048x3402", (6048, 3402), (1, 1), PRESET_RATES_HD),
     ("6K", "6K DCI 6144x3240", (6144, 3240), (1, 1), PRESET_RATES_CINEMA),
     ("6K", "6K Full Frame 6144x3160", (6144, 3160), (1, 1), PRESET_RATES_CINEMA),
-    // a 1.33x anamorphic lens on the 16:9 sensor: 4:3 pixels, shown 2.37:1
+    // a 1.33x anamorphic lens on the 16:9 sensor, edited squeezed: 4:3 pixels, shown 2.37:1
     ("6K", "6K Anamorphic 1.33x 6048x3402", (6048, 3402), (4, 3), PRESET_RATES_HD),
+    // the same edited desqueezed, in square pixels: 6048 x 1.33 = 8043.84, to the nearest even
+    // width ([`desqueezed_size`]), 2.36:1
+    ("6K", "6K Anamorphic 1.33x desqueezed 8044x3402", (8044, 3402), (1, 1), PRESET_RATES_ANAMORPHIC),
 ];
 
 /// Every named sequence preset, grouped (HD, UHD 4K, DCI 4K, 6K) and in order; names are unique.
@@ -2463,6 +2477,13 @@ mod tests {
         let ana = sequence_preset("6K Anamorphic 1.33x 6048x3402 23.976").unwrap();
         assert_eq!(ana.par, (4, 3));
         assert_eq!(conformed_size((ana.width, ana.height), ana.par, (1, 1)), (8064.0, 3402.0), "shown desqueezed, 2.37:1");
+        // the desqueezed anamorphic presets: the exact 1.33x squeeze of the 6K sensor in square
+        // pixels, at every rate the user edits at
+        for rate in ["23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60"] {
+            let p = sequence_preset(&format!("6K Anamorphic 1.33x desqueezed 8044x3402 {rate}")).unwrap();
+            assert_eq!(((p.width, p.height), p.par, p.group), (desqueezed_size((6048, 3402), (133, 100)), (1, 1), "6K"), "{rate}");
+        }
+        assert!(sequence_preset("6K Anamorphic 1.33x 6048x3402 59.94").is_some(), "the squeezed presets stay");
         assert!(sequence_preset("6K DCI 6144x3240 24").is_some() && sequence_preset("6K Full Frame 6144x3160 25").is_some());
         assert!(sequence_preset("UHD 2160p 119.88").is_some() && sequence_preset("4K 3984x2240 119.88").is_some());
         assert!(sequence_preset("DCI 4K 2160p 48").is_some());
