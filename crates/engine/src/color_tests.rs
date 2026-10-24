@@ -153,6 +153,51 @@ fn lut_folder_scan_reads_a_bounded_number_of_entries_per_folder() {
 }
 
 #[test]
+fn lut_folders_list_each_file_once() {
+    let base = std::env::temp_dir().join(format!("filmcraft-lut-dedup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (a, nested, b) = (base.join("A"), base.join("A").join("LUTs"), base.join("B"));
+    for dir in [&nested, &b] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    for p in [a.join("x.cube"), nested.join("y.cube"), b.join("z.cube")] {
+        std::fs::write(p, "").unwrap();
+    }
+    // a folder named twice, and a folder inside another one
+    let luts = crate::color::scan_lut_folders(&[a.clone(), b.clone(), a.clone(), nested.clone()]);
+    let mut names: Vec<&str> = luts.iter().map(|l| l.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["x", "y", "z"], "{luts:?}");
+    // y keeps its first listing, under A
+    assert_eq!(luts.iter().find(|l| l.name == "y").map(|l| l.group.as_str()), Some("LUTs"));
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn picking_a_copy_of_a_library_lut_records_its_path() {
+    let base = std::env::temp_dir().join(format!("filmcraft-lut-copy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let text = "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+    let (p1, p2) = (base.join("one.cube").to_string_lossy().to_string(), base.join("two.cube").to_string_lossy().to_string());
+    std::fs::write(&p1, text).unwrap();
+    std::fs::write(&p2, text).unwrap();
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let r1 = s.execute("lumetri.setInputLut", json!({"clip": clip.0, "path": p1})).unwrap();
+    let r2 = s.execute("lumetri.setInputLut", json!({"clip": clip.0, "path": p2})).unwrap();
+    // one library entry, now from the copy just picked
+    assert_eq!(r1["lut"], r2["lut"]);
+    assert_eq!(s.project.luts.len(), 1);
+    assert_eq!(s.project.luts[0].source_path.as_deref(), Some(p2.as_str()));
+    // the same path again is no edit
+    let n = s.history.undo.len();
+    s.execute("lut.import", json!({"path": p2})).unwrap();
+    assert_eq!(s.history.undo.len(), n);
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
 fn export_builtin_and_library_luts() {
     let mut s = demo();
     for (fmt, ext) in [("cube", "cube"), ("3dl", "3dl")] {

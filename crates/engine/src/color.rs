@@ -95,8 +95,18 @@ fn import_lut(s: &mut Session, path: &str, name: Option<&str>) -> Result<(String
     let lut = Lut::parse(&text, Some(fmt)).map_err(|e| bad("lut.import", format!("{path}: {e}")))?;
     let stem = std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "LUT".into());
     let name = name.map(str::to_string).unwrap_or(stem);
-    // re-importing identical content reuses the entry
-    if let Some(l) = s.project.luts.iter().find(|l| *l.text == *text) {
+    // re-importing identical content reuses the entry, now from this path (so the LUT menus mark
+    // the folder file just picked)
+    if let Some(i) = s.project.luts.iter().position(|l| *l.text == *text) {
+        if s.project.luts.get(i).is_some_and(|l| l.source_path.as_deref() != Some(path)) {
+            s.edit("Import LUT", |pr, _| {
+                if let Some(l) = pr.luts.get_mut(i) {
+                    l.source_path = Some(path.to_string());
+                }
+                Ok(())
+            })?;
+        }
+        let l = s.project.luts.get(i).ok_or_else(|| bad("lut.import", "the LUT library changed"))?;
         return Ok((l.id.clone(), json!({"id": l.id, "ref": format!("lib:{}", l.id), "name": l.name, "reused": true})));
     }
     let info = json!({
@@ -154,12 +164,15 @@ pub fn lut_folders() -> Vec<std::path::PathBuf> {
     if let Some(d) = crate::autosave::default_data_dir() {
         v.push(d.join("LUTs"));
     }
-    v.dedup();
+    // a folder named twice is scanned once, at its first place
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|p| seen.insert(p.clone()));
     v
 }
 
-/// The LUT files under `folders`, sorted by group then name (case-insensitively). Hidden entries
-/// (a leading `.`) are skipped; unreadable folders are empty.
+/// The LUT files under `folders`, sorted by group then name (case-insensitively), each file once
+/// (a folder can also sit inside another). Hidden entries (a leading `.`) are skipped; unreadable
+/// folders are empty.
 pub fn scan_lut_folders(folders: &[std::path::PathBuf]) -> Vec<FolderLut> {
     scan_lut_folders_within(folders, MAX_FOLDER_ENTRIES)
 }
@@ -171,6 +184,9 @@ pub(crate) fn scan_lut_folders_within(folders: &[std::path::PathBuf], entries: u
         let mut budget = entries;
         walk_lut_folder(root, root, 0, &mut budget, &mut out);
     }
+    // a file reached from two folders keeps its first listing
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|l| seen.insert(std::path::PathBuf::from(&l.path)));
     out.sort_by_cached_key(|l| (l.group.to_lowercase(), l.name.to_lowercase(), l.path.clone()));
     out
 }
