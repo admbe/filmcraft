@@ -811,6 +811,9 @@ pub enum ColorDialog {
         /// colour space keeps each selected item's own pixel aspect override.
         #[serde(default)]
         pixel_aspect_set: bool,
+        /// The same for the colour space: changing just the pixel aspect keeps each item's own.
+        #[serde(default)]
+        color_space_set: bool,
     },
     /// `sequence.colorSettings`.
     Sequence { working_space: String, wide_gamut: bool, auto_tone_map: bool },

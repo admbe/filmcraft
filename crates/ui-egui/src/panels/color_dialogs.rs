@@ -40,7 +40,7 @@ pub fn open_interpret(app: &mut FilmcraftApp, params: &Value) {
         .and_then(|it| it.as_media())
         .and_then(|m| m.interpret.par.and_then(filmcraft_project::checked_par))
         .map_or_else(|| "file".to_string(), |(n, d)| format!("{n}:{d}"));
-    app.ui.color_dialog = Some(ColorDialog::Interpret { items, color_space: current, pixel_aspect, pixel_aspect_set: false });
+    app.ui.color_dialog = Some(ColorDialog::Interpret { items, color_space: current, pixel_aspect, pixel_aspect_set: false, color_space_set: false });
 }
 
 /// The `[num, den]` of a dialog choice (`"num:den"`), None for "file" or anything else.
@@ -89,7 +89,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let mut apply: Option<(&'static str, Value)> = None;
     let mut close = false;
     match &mut d {
-        ColorDialog::Interpret { items, color_space, pixel_aspect, pixel_aspect_set } => {
+        ColorDialog::Interpret { items, color_space, pixel_aspect, pixel_aspect_set, color_space_set } => {
             let detected = items
                 .first()
                 .and_then(|i| app.session.execute("media.colorInfo", json!({"item": i})).ok())
@@ -125,7 +125,10 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         && !filmcraft_project::STANDARD_PIXEL_ASPECTS.iter().any(|(_, p)| *p == par)
                     {
                         let label = filmcraft_project::pixel_aspect_label(par);
-                        radio(app, ui, &format!("colorDialog.par.{}x{}", par.0, par.1), true, &label);
+                        // the first item's own ratio: picking it applies it to every item
+                        if radio(app, ui, &format!("colorDialog.par.{}x{}", par.0, par.1), true, &label) {
+                            *pixel_aspect_set = true;
+                        }
                     }
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new(tl!("Color Management")).strong());
@@ -134,19 +137,24 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     ui.label(tl!("Override media colour space:"));
                     if radio(app, ui, "colorDialog.space.auto", color_space == "auto", tl!("Use file metadata")) {
                         *color_space = "auto".into();
+                        *color_space_set = true;
                     }
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                         for cs in ColorSpace::ALL {
                             if radio(app, ui, &format!("colorDialog.space.{}", cs.id()), color_space == cs.id(), cs.label()) {
                                 *color_space = cs.id().into();
+                                *color_space_set = true;
                             }
                         }
                     });
                     let (ok, cancel) = buttons(app, ui);
-                    if ok {
-                        let mut p = json!({"items": items, "colorSpace": color_space});
-                        // the first item's ratio goes to every item only when the user picked one;
-                        // left out, each item keeps its own override
+                    // the dialog shows the first item's choices; each goes to every item only when
+                    // the user picked it, and left out, each item keeps its own override
+                    if ok && (*color_space_set || *pixel_aspect_set) {
+                        let mut p = json!({"items": items});
+                        if *color_space_set {
+                            p["colorSpace"] = json!(color_space);
+                        }
                         if *pixel_aspect_set {
                             p["pixelAspect"] = match par_choice(pixel_aspect) {
                                 Some((num, den)) => json!([num, den]),
