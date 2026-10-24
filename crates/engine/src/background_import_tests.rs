@@ -64,6 +64,35 @@ fn an_import_whose_worker_ended_early_finishes_with_the_files_it_opened() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An import in which no file could be opened used to report its job as a success in `jobs.list`
+/// (the failures only showed in a toast).
+#[test]
+fn a_background_import_that_adds_nothing_fails_its_job() {
+    let dir = crate::media_test_util::tmp_dir("background-import-all-failed");
+    let paths: Vec<String> = (0..3).map(|i| dir.join(format!("not-there{i}.wav")).to_string_lossy().into_owned()).collect();
+    let mut s = Session::default();
+    let r = s.execute("file.import", json!({ "paths": paths, "async": true })).unwrap();
+    let job = r["importJob"].as_u64().unwrap();
+    let started = Instant::now();
+    while !s.background_imports.is_empty() && started.elapsed() < Duration::from_secs(30) {
+        poll(&mut s);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(s.background_imports.is_empty(), "the import finished");
+    // the worker may still be writing its own result: it must not turn the failure into a success
+    let progress = s.jobs.iter().find(|j| j.id == job).unwrap().progress.clone();
+    while !progress.finished.load(Ordering::Relaxed) && started.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(20));
+    let listed = s.execute("jobs.list", json!({})).unwrap();
+    let entry = listed.as_array().and_then(|a| a.iter().find(|j| j["id"] == job)).cloned().unwrap_or_default();
+    let err = entry["result"]["error"].as_str().unwrap_or_default();
+    assert!(err.contains("not-there0.wav") && err.contains("not-there2.wav"), "jobs.list reports the failure: {entry}");
+    assert!(progress.error.lock().unwrap().is_some(), "the Progress panel shows the failure: {entry}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Opening another project while a drop of many files is still opening used to add the rest of
 /// the files to the other project, one undo step each.
 #[test]

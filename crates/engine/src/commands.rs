@@ -1299,14 +1299,18 @@ pub(crate) fn place_ranges_in_one_edit(
 
 /// `timeline.place` with `items` in one edit: each item where the one before it ends.
 fn place_items_in_one_edit(s: &mut Session, p: &Value, ids: &[ItemId], at: Tick) -> Result<Value> {
+    // the parameters every item shares, without `items`: copied once per item (up to 10 000)
+    let mut base = p.clone();
+    if let Some(o) = base.as_object_mut() {
+        o.remove("items");
+        for k in ["time", "frame", "seconds"] {
+            o.remove(k);
+        }
+    }
     let mut plans = Vec::with_capacity(ids.len());
     for item in ids {
-        let mut one = p.clone();
+        let mut one = base.clone();
         if let Some(o) = one.as_object_mut() {
-            o.remove("items");
-            for k in ["time", "frame", "seconds"] {
-                o.remove(k);
-            }
             o.insert("item".into(), json!(item.0));
         }
         let plan = plan_one(s, &one)?;

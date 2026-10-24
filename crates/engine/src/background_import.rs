@@ -66,14 +66,18 @@ pub(crate) fn start(s: &mut Session, paths: Vec<String>, bin: Option<BinId>) -> 
         let secs = t0.elapsed().as_secs_f64();
         *progress.status.lock().unwrap_or_else(|e| e.into_inner()) = format!("Opened in {secs:.1}s");
         progress.finished.store(true, Ordering::Relaxed);
-        *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok(filmcraft_export::Report {
-            path: String::new(),
-            frames: todo.len() as u64,
-            seconds: secs,
-            bytes: 0,
-            render_fps: 0.0,
-            extra_files: Vec::new(),
-        }));
+        // the UI thread may already have finished the import (every file added) and set a failure
+        let mut result = result.lock().unwrap_or_else(|e| e.into_inner());
+        if result.is_none() {
+            *result = Some(Ok(filmcraft_export::Report {
+                path: String::new(),
+                frames: todo.len() as u64,
+                seconds: secs,
+                bytes: 0,
+                render_fps: 0.0,
+                extra_files: Vec::new(),
+            }));
+        }
     };
     let run = crate::export_tools::guard_job(job.progress.clone(), job.result.clone(), run);
     // recorded once the thread runs: a thread that could not start leaves no job "running" forever
@@ -157,7 +161,13 @@ fn finish(s: &mut Session, done: Pending) {
     let secs = done.started.elapsed().as_secs_f64();
     log::info!("import of {} files done in {secs:.1} s: {} added, {} failed", done.paths.len(), done.items.len(), errors.len());
     if !errors.is_empty() {
-        s.error_toast("file.import", errors.join("; "));
+        let message = errors.join("; ");
+        // nothing was imported: the job failed (`jobs.list`, the Progress panel), not just a toast
+        if done.items.is_empty() {
+            *done.progress.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.clone());
+            *done.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(message.clone()));
+        }
+        s.error_toast("file.import", message);
     }
 }
 
