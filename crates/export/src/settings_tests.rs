@@ -1354,3 +1354,20 @@ fn a_saved_null_pixel_aspect_still_means_square_pixels() {
         assert_eq!(load(v.clone()).unwrap().pixel_aspect, par, "{v}");
     }
 }
+
+/// A saved or passed pixel aspect ratio that makes no sense is refused, not silently left out of
+/// the stream.
+#[test]
+fn a_pixel_aspect_that_makes_no_sense_is_refused() {
+    let with = |par| crate::ExportSettings { pixel_aspect: par, ..Default::default() };
+    for bad in [(0, 1), (1, 0), (0, 0), (9, 1), (1, 9), (u32::MAX, 1)] {
+        assert!(with(Some(bad)).validate().is_err(), "{bad:?}");
+    }
+    for good in [None, Some((1, 1)), Some((4, 3)), Some((133, 100)), Some((10, 11)), Some((8, 1))] {
+        assert!(with(good).validate().is_ok(), "{good:?}");
+    }
+    // a saved [0, 1] loads, and then fails validation with a reason
+    let s: crate::ExportSettings = serde_json::from_value(serde_json::json!({"pixelAspect": [0, 1]})).unwrap();
+    let e = s.validate().unwrap_err().to_string();
+    assert!(e.contains("pixel aspect"), "{e}");
+}

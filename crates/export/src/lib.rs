@@ -660,6 +660,14 @@ impl ExportSettings {
         if let Some((width, height)) = self.frame_size {
             filmcraft_project::validate_frame_size(width, height).map_err(ExportError::Unsupported)?;
         }
+        if let Some((n, d)) = self.pixel_aspect
+            && filmcraft_project::checked_par((n, d)).is_none()
+        {
+            return Err(ExportError::Unsupported(format!(
+                "pixel aspect ratio {n}:{d}: both parts must be positive and the ratio at most {0}:1 either way",
+                filmcraft_project::MAX_PIXEL_ASPECT
+            )));
+        }
         if let Some(rate) = self.frame_rate
             && (rate.num <= 0
                 || rate.den <= 0
