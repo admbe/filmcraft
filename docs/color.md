@@ -129,7 +129,8 @@ It imports every media file of the folder (`file.import`), builds a sequence fro
 (`file.newSequence {fromItems}`), measures and corrects each clip with one `lumetri.auto` call
 (`into: "raw"` for clips with RAW development controls when asked, Lumetri otherwise), prints the table of measured and set
 values, leaves clips under the confidence threshold alone (it measures them with `apply: false` first and
-applies only the confident ones), then exports with a named preset (`file.exportMedia {path, preset,
+applies only the confident ones; a clip that cannot be measured or corrected stops it before the
+export), then exports with a named preset (`file.exportMedia {path, preset,
 wait}`; `export.presets.list` names the presets) and waits for the job in `jobs.list`, since a long
 export outlives the control channel's one-minute request timeout.
 
@@ -158,6 +159,8 @@ paths = sorted(str(p) for p in pathlib.Path(folder).iterdir() if p.is_file())
 items = run(call, "file.import", paths=paths)["items"]
 seq = run(call, "file.newSequence", name="Auto", fromItems=items)["sequence"]
 measured = run(call, "lumetri.auto", items=items, frames="sampled", apply=False)
+if measured["errors"]:  # a clip that could not be measured: don't correct or export
+    sys.exit(f"not measured: {measured['errors']}")
 good = [m["clip"] for m in measured["items"] if m["confidence"] >= 0.4]
 if good:
     result = run(call, "lumetri.auto", clips=good, frames="sampled", into="lumetri")

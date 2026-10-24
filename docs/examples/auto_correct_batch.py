@@ -82,8 +82,12 @@ def main():
         print(f"{m['clip']:>6} {m['confidence']:>5.2f} {a['temperature']:>7.1f} {a['tint']:>7.1f} {a['exposure']:>6.2f}  {a['cast']:.2f}  {a['p50']:.3f}  {a['p99']:.3f}")
         if m["confidence"] >= args.min_confidence:
             good.append(m["clip"])
-    for e in measured.get("errors", []):
-        print(f"{e['clip']:>6} skipped: {e['error']}")
+    # a clip that could not be measured would be exported uncorrected: report it and stop
+    measure_errors = measured.get("errors") or []
+    for e in measure_errors:
+        print(f"{str(e.get('clip')):>6} not measured: {e.get('error')}", file=sys.stderr)
+    if measure_errors:
+        sys.exit(f"{len(measure_errors)} clip(s) could not be measured; nothing corrected or exported")
 
     if good:
         result = engine("lumetri.auto", clips=good, into="raw" if args.raw else "lumetri", **options)
