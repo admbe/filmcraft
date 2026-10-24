@@ -10,9 +10,9 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use filmcraft_ui_egui::ControlRequest;
@@ -25,11 +25,29 @@ pub const MAX_LINE: usize = 4 * 1024 * 1024;
 /// Connections served at once; further ones get an error line and are closed.
 pub const MAX_CONNECTIONS: usize = 16;
 
-pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+/// The egui context of the current window, which a request wakes so it is handled promptly. The
+/// window can be recreated while the server runs (a lost graphics device, see `hosted.rs`); the
+/// host sets the new context and the server follows.
+#[derive(Clone, Default)]
+pub struct SharedContext(Arc<Mutex<Option<egui::Context>>>);
+
+impl SharedContext {
+    pub fn set(&self, ctx: egui::Context) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(ctx);
+    }
+
+    pub fn request_repaint(&self) {
+        if let Some(ctx) = self.0.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+            ctx.request_repaint();
+        }
+    }
+}
+
+pub fn start(port: u16, ctx: SharedContext) -> Receiver<ControlRequest> {
     start_with_token(port, ctx, std::env::var("FILMCRAFT_CONTROL_TOKEN").ok())
 }
 
-fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> Receiver<ControlRequest> {
+fn start_with_token(port: u16, ctx: SharedContext, token: Option<String>) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
     // An inherited environment variable shares the credential with the owner's bridge process
     // without exposing it in command-line arguments, logs, or a shared discovery file.
@@ -49,7 +67,7 @@ fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> Rec
     rx
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String) {
+fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: SharedContext, token: String) {
     let open = Arc::new(AtomicUsize::new(0));
     for mut stream in listener.incoming().flatten() {
         if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
@@ -82,7 +100,7 @@ impl Drop for Slot {
     }
 }
 
-fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: &str) {
+fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &SharedContext, token: &str) {
     let Ok(read) = stream.try_clone() else { return };
     serve_lines(read, stream, token, |method, params| {
         let (req, rrx) = ControlRequest::new(method, params);
@@ -301,7 +319,7 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, _rx) = channel::<ControlRequest>();
-        std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default(), TOKEN.into()));
+        std::thread::spawn(move || accept_loop(listener, tx, SharedContext::default(), TOKEN.into()));
         // Idle connections are accepted in order and held open.
         let held: Vec<TcpStream> = (0..16).map(|_| TcpStream::connect(addr).unwrap()).collect();
         let mut extra = TcpStream::connect(addr).unwrap();
@@ -318,7 +336,7 @@ mod tests {
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let port = listener.local_addr().unwrap().port();
             drop(listener);
-            let rx = start_with_token(port, egui::Context::default(), token);
+            let rx = start_with_token(port, SharedContext::default(), token);
             assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)));
             let _still_available = TcpListener::bind(("127.0.0.1", port)).unwrap();
         }
@@ -362,7 +380,7 @@ mod tests {
         let (tx, rx) = channel::<ControlRequest>();
         let server = std::thread::spawn(move || {
             let (s, _) = listener.accept().unwrap();
-            serve(s, &tx, &egui::Context::default(), TOKEN);
+            serve(s, &tx, &SharedContext::default(), TOKEN);
         });
         let mut c = TcpStream::connect(addr).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -382,7 +400,7 @@ mod tests {
         let (tx, rx) = channel::<ControlRequest>();
         let server = std::thread::spawn(move || {
             let (s, _) = listener.accept().unwrap();
-            serve(s, &tx, &egui::Context::default(), TOKEN);
+            serve(s, &tx, &SharedContext::default(), TOKEN);
         });
         let params = json!({"command": "file.saveAs", "params": {"path": "/owner/project.fcproj"}});
         let mut c = TcpStream::connect(addr).unwrap();
