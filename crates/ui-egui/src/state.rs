@@ -532,6 +532,8 @@ pub struct UiState {
     /// Sequence Settings dialog draft.
     #[serde(default)]
     pub sequence_settings: SequenceSettingsDraft,
+    /// File ▸ New ▸ Project….
+    pub new_project: NewProjectDraft,
     /// Set Transition Duration dialog draft (double-click a transition).
     #[serde(default)]
     pub transition_duration: TransitionDurationDraft,
@@ -882,6 +884,17 @@ pub struct SequenceSettingsDraft {
     pub par: (u32, u32),
     /// The Pixel Aspect Ratio list is on Custom: the ratio is typed as two numbers.
     pub par_custom: bool,
+    /// The type of the audio tracks (`Standard`, `Mono`, `5.1`, `Adaptive`): New Sequence makes
+    /// them so, Save Preset keeps it.
+    pub track_type: String,
+    /// Save Preset: the name being typed (`None`: the name row is closed).
+    pub save_name: Option<String>,
+    /// Save Preset found a custom preset of that name: the row asks to replace it.
+    pub save_replace: bool,
+    /// Sequence Presets: the custom preset being renamed and the new name typed for it.
+    pub renaming: Option<(String, String)>,
+    /// Sequence Presets: the custom preset whose Delete asks for confirmation.
+    pub deleting: Option<String>,
     /// New Sequence: the name of the chosen preset (`sequence.presets`), sent as `preset`; empty
     /// when none was chosen.
     pub preset: String,
@@ -909,6 +922,11 @@ impl Default for SequenceSettingsDraft {
             height: 1080,
             par: (1, 1),
             par_custom: false,
+            track_type: "Standard".into(),
+            save_name: None,
+            save_replace: false,
+            renaming: None,
+            deleting: None,
             preset: String::new(),
             scale_motion: true,
             drop_frame: false,
@@ -920,6 +938,15 @@ impl Default for SequenceSettingsDraft {
             auto_tone_map: true,
         }
     }
+}
+
+/// The New Project dialog (File ▸ New ▸ Project…): the project's name and the preset of the
+/// sequence it starts with (built-in or custom; empty: none, an empty project).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NewProjectDraft {
+    pub name: String,
+    pub preset: String,
 }
 
 /// The Delete Tracks dialog (Sequence ▸ Delete Tracks…): per kind, whether to delete and which
@@ -1023,6 +1050,7 @@ impl Default for UiState {
             add_tracks: AddTracksDraft::default(),
             delete_tracks: DeleteTracksDraft::default(),
             sequence_settings: SequenceSettingsDraft::default(),
+            new_project: NewProjectDraft::default(),
             transition_duration: TransitionDurationDraft::default(),
             gfx_edit: None,
             pen_points: vec![],

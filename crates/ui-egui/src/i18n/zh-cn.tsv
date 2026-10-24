@@ -3612,3 +3612,13 @@
 	Custom…	自定义…
 	Desqueezed Sequence From Clip	从剪辑创建去压缩序列
 	New Desqueezed Sequence From Clip	从剪辑新建去压缩序列
+	Delete this preset?	删除此预设？
+	Preset name:	预设名称：
+	A preset called {name} exists.	已存在名为 {name} 的预设。
+	Replace	替换
+	Saved sequence preset {name}	已保存序列预设 {name}
+	{w} x {h}, {rate} fps, {par}; {hz} Hz {mix}; {v} video and {a} audio tracks	{w} x {h}，{rate} fps，{par}；{hz} Hz {mix}；{v} 条视频轨道和 {a} 条音频轨道
+	New Project	新建项目
+	Sequence:	序列：
+	None (an empty project)	无（空项目）
+	The project starts with a sequence made from this preset (Custom or built-in), or with none.	项目以根据此预设（自定义或内置）创建的序列开始，或不含序列。

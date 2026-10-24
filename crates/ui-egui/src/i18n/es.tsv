@@ -3637,3 +3637,13 @@
 	Custom…	Personalizado…
 	Desqueezed Sequence From Clip	Secuencia desanamorfizada a partir de clip
 	New Desqueezed Sequence From Clip	Nueva secuencia desanamorfizada a partir del clip
+	Delete this preset?	¿Eliminar este ajuste preestablecido?
+	Preset name:	Nombre del ajuste preestablecido:
+	A preset called {name} exists.	Ya existe un ajuste preestablecido llamado {name}.
+	Replace	Reemplazar
+	Saved sequence preset {name}	Ajuste preestablecido de secuencia {name} guardado
+	{w} x {h}, {rate} fps, {par}; {hz} Hz {mix}; {v} video and {a} audio tracks	{w} x {h}, {rate} fps, {par}; {hz} Hz {mix}; {v} pistas de vídeo y {a} de audio
+	New Project	Nuevo proyecto
+	Sequence:	Secuencia:
+	None (an empty project)	Ninguna (un proyecto vacío)
+	The project starts with a sequence made from this preset (Custom or built-in), or with none.	El proyecto empieza con una secuencia creada a partir de este ajuste preestablecido (personalizado o integrado), o sin ninguna.

@@ -3636,3 +3636,13 @@
 	Custom…	カスタム…
 	Desqueezed Sequence From Clip	クリップからデスクイーズしたシーケンスを作成
 	New Desqueezed Sequence From Clip	クリップからデスクイーズした新規シーケンス
+	Delete this preset?	このプリセットを削除しますか？
+	Preset name:	プリセット名:
+	A preset called {name} exists.	{name} という名前のプリセットは既にあります。
+	Replace	置き換え
+	Saved sequence preset {name}	シーケンスプリセット {name} を保存しました
+	{w} x {h}, {rate} fps, {par}; {hz} Hz {mix}; {v} video and {a} audio tracks	{w} x {h}、{rate} fps、{par}、{hz} Hz {mix}、ビデオトラック {v}、オーディオトラック {a}
+	New Project	新規プロジェクト
+	Sequence:	シーケンス:
+	None (an empty project)	なし（空のプロジェクト）
+	The project starts with a sequence made from this preset (Custom or built-in), or with none.	プロジェクトは、このプリセット（カスタムまたは組み込み）から作成したシーケンスで始まります。なしを選ぶと空のプロジェクトになります。

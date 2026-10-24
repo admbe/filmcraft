@@ -644,6 +644,145 @@ fn sequence_settings_dialog_changes_the_pixel_aspect_ratio() {
     d.click("sequenceSettings.cancel");
 }
 
+/// New Sequence's Save Preset keeps the dialog's settings and tracks as a custom preset, listed
+/// first in a Custom group; choosing it fills the dialog; Rename and Delete (with a confirmation)
+/// change the user's presets. None of it is a project edit.
+#[test]
+fn new_sequence_saves_renames_and_deletes_custom_presets() {
+    let mut d = Driver::demo();
+    let history = d.app().session.history.undo.len();
+    d.ok("ui.menu.invoke", json!({"id": "file.newSequence"}));
+    d.frames(10);
+    assert!(d.ids("sequenceSettings.presetGroup.Custom").is_empty(), "no custom presets yet: no Custom group");
+    // a 25 fps preset, then the desqueezed frame size (as the 6K group's desqueezed preset has it)
+    d.click("sequenceSettings.preset.HD 1080p 25");
+    (d.app().ui.sequence_settings.width, d.app().ui.sequence_settings.height) = (8044, 3402);
+    d.click("sequenceSettings.tab.tracks");
+    d.app().ui.sequence_settings.video_tracks = 2;
+    d.app().ui.sequence_settings.audio_tracks = 4;
+    d.click("sequenceSettings.tracks.type");
+    d.click("sequenceSettings.tracks.type.option.Mono");
+    d.click("sequenceSettings.savePreset");
+    assert!(d.ids("sequenceSettings.savePreset.name").iter().any(|i| i == "sequenceSettings.savePreset.name"));
+    d.app().ui.sequence_settings.save_name = Some("ZR 8044 25p".into());
+    d.frames(2);
+    d.click("sequenceSettings.savePreset.save");
+    d.frames(2);
+    let saved = d.app().session.sequence_presets.find("ZR 8044 25p").cloned().expect("saved");
+    assert_eq!((saved.width, saved.height, saved.pixel_aspect, saved.video_tracks, saved.audio_tracks), (8044, 3402, (1, 1), 2, 4));
+    assert_eq!(saved.audio_track_type, Some(filmcraft_engine::project::AudioChannels::Mono));
+    assert!(d.ids("sequenceSettings.savePreset.name").is_empty(), "the name row closed");
+    assert_eq!(d.app().session.history.undo.len(), history, "a preset is not a project edit");
+    // listed in the Custom group, chosen
+    d.click("sequenceSettings.tab.presets");
+    assert!(d.ids("sequenceSettings.presetGroup.Custom").iter().any(|i| i == "sequenceSettings.presetGroup.Custom"));
+    assert!(d.ids("sequenceSettings.preset.ZR 8044 25p").iter().any(|i| i == "sequenceSettings.preset.ZR 8044 25p"));
+    assert!(d.label("sequenceSettings.presetDescription").contains("8044 x 3402"), "{}", d.label("sequenceSettings.presetDescription"));
+    d.snapshot("new-sequence-custom-presets", "sequenceSettings.");
+    // the same name again asks to replace
+    d.click("sequenceSettings.savePreset");
+    d.app().ui.sequence_settings.save_name = Some("zr 8044 25P".into());
+    d.app().ui.sequence_settings.audio_tracks = 1;
+    d.frames(2);
+    d.click("sequenceSettings.savePreset.save");
+    d.frames(2);
+    assert_eq!(d.app().session.sequence_presets.find("ZR 8044 25p").unwrap().audio_tracks, 4, "not yet");
+    d.click("sequenceSettings.savePreset.replace");
+    d.frames(2);
+    let replaced = d.app().session.sequence_presets.find("ZR 8044 25p").cloned().unwrap();
+    assert_eq!((replaced.audio_tracks, replaced.name.as_str()), (1, "ZR 8044 25p"), "replaced, under its own name");
+    // choosing another preset, then the custom one again, fills the dialog with its settings
+    d.click("sequenceSettings.preset.HD 1080p 23.976");
+    d.click("sequenceSettings.preset.ZR 8044 25p");
+    let dr = d.app().ui.sequence_settings.clone();
+    assert_eq!((dr.width, dr.height, dr.fps_num, dr.fps_den, dr.audio_tracks, dr.track_type.as_str()), (8044, 3402, 25, 1, 1, "Mono"));
+    // rename
+    d.click("sequenceSettings.presetRename.ZR 8044 25p");
+    assert!(d.ids("sequenceSettings.presetRename.text").iter().any(|i| i == "sequenceSettings.presetRename.text"));
+    d.app().ui.sequence_settings.renaming = Some(("ZR 8044 25p".into(), "Anamorphic 25p".into()));
+    d.frames(2);
+    d.click("sequenceSettings.presetRename.ok");
+    d.frames(2);
+    assert!(d.app().session.sequence_presets.find("Anamorphic 25p").is_some());
+    assert_eq!(d.app().ui.sequence_settings.preset, "Anamorphic 25p", "the chosen preset follows its new name");
+    // OK makes the sequence from it
+    d.click("sequenceSettings.ok");
+    let q = d.app().session.active_sequence().unwrap();
+    assert_eq!((q.settings.width, q.settings.preset.as_str(), q.video_tracks.len(), q.audio_tracks.len()), (8044, "Anamorphic 25p", 2, 1));
+    // delete asks first
+    d.ok("ui.menu.invoke", json!({"id": "file.newSequence"}));
+    d.frames(10);
+    d.click("sequenceSettings.presetDelete.Anamorphic 25p");
+    assert!(d.app().session.sequence_presets.find("Anamorphic 25p").is_some(), "not before the confirmation");
+    d.click("sequenceSettings.presetDelete.cancel");
+    d.click("sequenceSettings.presetDelete.Anamorphic 25p");
+    d.click("sequenceSettings.presetDelete.confirm");
+    d.frames(2);
+    assert!(d.app().session.sequence_presets.user.is_empty());
+    assert!(d.ids("sequenceSettings.presetGroup.Custom").is_empty());
+    d.click("sequenceSettings.cancel");
+}
+
+/// Sequence Settings' Save Preset keeps the open sequence's settings and its track layout.
+#[test]
+fn sequence_settings_saves_the_sequence_as_a_preset() {
+    let mut d = Driver::demo();
+    let (nv, na) = {
+        let q = d.app().session.active_sequence().unwrap();
+        (q.video_tracks.len() as u32, q.audio_tracks.len() as u32)
+    };
+    d.ok("ui.menu.invoke", json!({"id": "sequence.settings"}));
+    d.frames(10);
+    d.click("sequenceSettings.par");
+    d.click("sequenceSettings.par.option.133x100");
+    d.click("sequenceSettings.savePreset");
+    d.app().ui.sequence_settings.save_name = Some("Main edit look".into());
+    d.frames(2);
+    d.click("sequenceSettings.savePreset.save");
+    d.frames(2);
+    let p = d.app().session.sequence_presets.find("Main edit look").cloned().expect("saved");
+    assert_eq!((p.width, p.height, p.pixel_aspect, p.video_tracks, p.audio_tracks), (1920, 1080, (133, 100), nv, na));
+    // the dialog is still open, its change not applied yet
+    assert!(d.ids("sequenceSettings.ok").iter().any(|i| i == "sequenceSettings.ok"));
+    assert_eq!(d.app().session.active_sequence().unwrap().settings.par, (1, 1));
+    d.click("sequenceSettings.cancel");
+}
+
+/// File ▸ New ▸ Project… asks for the name and the preset of the first sequence (custom presets
+/// first); OK makes the project with that sequence. Agents passing a name make it directly.
+#[test]
+fn new_project_starts_with_a_sequence_from_a_chosen_preset() {
+    let mut d = Driver::demo();
+    d.exec("sequence.preset.save", json!({"name": "Desqueezed 23.976", "width": 8044, "height": 3402, "fps": 23.976, "video": 2, "audio": 2}));
+    let r = d.ok("ui.menu.invoke", json!({"id": "file.newProject"}));
+    assert_eq!(r["dialog"], "newProject", "{r}");
+    d.frames(6);
+    assert_eq!(d.label("newProject.preset"), "None (an empty project)");
+    d.click("newProject.preset");
+    let options = d.ids("newProject.preset.option.");
+    assert!(options.iter().any(|i| i == "newProject.preset.option.Desqueezed 23.976"), "{options:?}");
+    assert!(options.iter().any(|i| i == "newProject.preset.option.6K Anamorphic 1.33x desqueezed 8044x3402 59.94"), "{options:?}");
+    d.click("newProject.preset.option.Desqueezed 23.976");
+    d.app().ui.new_project.name = "Anamorphic job".into();
+    d.frames(2);
+    d.snapshot("new-project", "newProject.");
+    d.click("newProject.ok");
+    assert!(d.ids("newProject.").is_empty(), "closed");
+    assert_eq!(d.app().session.project.name, "Anamorphic job");
+    let q = d.app().session.active_sequence().unwrap();
+    assert_eq!((q.settings.width, q.video_tracks.len(), q.settings.preset.as_str()), (8044, 2, "Desqueezed 23.976"));
+    // Cancel makes nothing; no preset makes an empty project
+    d.ok("ui.menu.invoke", json!({"id": "file.newProject"}));
+    d.frames(4);
+    d.click("newProject.cancel");
+    assert_eq!(d.app().session.project.name, "Anamorphic job");
+    d.ok("ui.menu.invoke", json!({"id": "file.newProject"}));
+    d.frames(4);
+    d.click("newProject.ok");
+    let project = d.app().session.project.clone();
+    assert_eq!((project.name.as_str(), project.sequences().count()), ("Untitled", 0));
+}
+
 /// The General tab's Sequence Name renames the sequence (its Project panel item) together with
 /// the other settings, in the same undo step; a blank name keeps the old one.
 #[test]

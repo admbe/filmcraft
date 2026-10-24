@@ -204,7 +204,7 @@ pub(crate) fn f64_p(p: &Value, k: &str) -> Option<f64> {
     p.get(k).and_then(Value::as_f64)
 }
 /// `fps` as a sequence frame rate; zero or negative rates are refused (all frame maths divides by them).
-fn fps_p(p: &Value, cmd: &str) -> Result<Option<FrameRate>> {
+pub(crate) fn fps_p(p: &Value, cmd: &str) -> Result<Option<FrameRate>> {
     let Some(fps) = f64_p(p, "fps") else { return Ok(None) };
     let r = FrameRate::from_f64(fps);
     if r.num <= 0 || r.frame_duration() <= Tick::ZERO {
@@ -1170,8 +1170,23 @@ fn marker_list_mut(s: &mut Session) -> Result<(ItemId, Tick)> {
 fn build() -> Vec<CommandSpec> {
     let mut v = vec![
         // ================= File =================
-        cmd!("file.newProject", "Project…", ["File", "New"], Some("Cmd+Alt+N"), r#"{"name":str}"#, always, |s, p| {
+        cmd!("file.newProject", "Project…", ["File", "New"], Some("Cmd+Alt+N"), r#"{"name":str,"sequencePreset":str?}"#, always, |s, p| {
             let name = str_p(p, "name").unwrap_or("Untitled").to_string();
+            // `sequencePreset`: the project starts with a sequence made from that preset (built-in
+            // or custom; `sequence.presets`); an unknown one is refused before anything changes
+            let first = match p.get("sequencePreset") {
+                None | Some(Value::Null) => None,
+                Some(v) => {
+                    let n = v
+                        .as_str()
+                        .filter(|n| !n.trim().is_empty())
+                        .ok_or_else(|| bad("file.newProject", "`sequencePreset` must be a preset name (see sequence.presets)"))?;
+                    if crate::sequence_presets::pick(s, n).is_none() {
+                        return Err(bad("file.newProject", format!("unknown sequence preset `{n}` (see sequence.presets)")));
+                    }
+                    Some(n.to_string())
+                }
+            };
             s.project = std::sync::Arc::new(filmcraft_project::Project::new(&name));
             s.history = Default::default();
             s.history.limit = 200;
@@ -1182,7 +1197,10 @@ fn build() -> Vec<CommandSpec> {
             s.revision += 1;
             s.saved_revision = s.revision;
             s.events.push(crate::Event::ProjectChanged { revision: s.revision });
-            Ok(Value::Null)
+            match first {
+                Some(preset) => s.execute("file.newSequence", json!({"name": "Sequence 01", "preset": preset})),
+                None => Ok(Value::Null),
+            }
         }),
         cmd!("file.openDemoProject", "Demo Project", ["File", "New"], None, "{}", always, |s, _| {
             let (p, seq) = crate::demo::demo_project(&s.media);
@@ -1227,20 +1245,25 @@ fn build() -> Vec<CommandSpec> {
                 }
                 // `desqueeze`: a clip with non-square pixels makes a square-pixel sequence at its display size
                 let desqueezed = bool_p(p, "desqueeze").unwrap_or(false) && desqueeze_settings(&mut st);
-                // a named preset (`sequence.presets`) sets the picture; explicit parameters then override it
+                // a named preset (`sequence.presets`) sets the picture (a custom one its audio and
+                // tracks too); explicit parameters then override it
                 let preset = match p.get("preset") {
                     None | Some(Value::Null) => None,
                     Some(v) => {
                         let name = v.as_str().ok_or_else(|| bad("file.newSequence", "`preset` must be a preset name (see sequence.presets)"))?;
                         Some(
-                            filmcraft_project::sequence_preset(name)
+                            crate::sequence_presets::pick(s, name)
                                 .ok_or_else(|| bad("file.newSequence", format!("unknown sequence preset `{name}` (see sequence.presets)")))?,
                         )
                     }
                 };
-                if let Some(preset) = preset {
-                    st = SequenceSettings { sample_rate: st.sample_rate, ..preset.settings() };
+                if let Some(preset) = &preset {
+                    st = match preset.tracks {
+                        Some(_) => preset.settings.clone(),
+                        None => SequenceSettings { sample_rate: st.sample_rate, ..preset.settings.clone() },
+                    };
                 }
+                let (preset_video, preset_audio, preset_type) = preset.as_ref().and_then(|p| p.tracks).unwrap_or((3, 3, None));
                 if let Some(w) = checked_u32_p(p, "width", "file.newSequence")? {
                     st.width = w;
                 }
@@ -1265,17 +1288,21 @@ fn build() -> Vec<CommandSpec> {
                         crate::mixer::channels_from(t)
                             .ok_or_else(|| bad("file.newSequence", format!("unknown track type `{t}` (Standard, Mono, 5.1, Adaptive)")))?,
                     ),
-                    None => None,
+                    None => preset_type,
                 };
                 // named after the preset it still matches (a desqueezed clip's: the one its picture
                 // matches), else by its picture
-                st.preset = match preset.filter(|pr| pr.matches(&st)).or_else(|| filmcraft_project::sequence_preset_of(&st).filter(|_| desqueezed)) {
-                    Some(pr) => pr.name.to_string(),
+                st.preset = match preset
+                    .filter(|pr| pr.matches(&st))
+                    .map(|pr| pr.name)
+                    .or_else(|| filmcraft_project::sequence_preset_of(&st).filter(|_| desqueezed).map(|pr| pr.name.to_string()))
+                {
+                    Some(name) => name,
                     None => format!("{}x{} {}", st.width, st.height, st.frame_rate.label()),
                 };
                 st.validate().map_err(|e| bad("file.newSequence", e))?;
-                let nv = checked_u32_p(p, "video", "file.newSequence")?.unwrap_or(3);
-                let na = checked_u32_p(p, "audio", "file.newSequence")?.unwrap_or(3);
+                let nv = checked_u32_p(p, "video", "file.newSequence")?.unwrap_or(preset_video);
+                let na = checked_u32_p(p, "audio", "file.newSequence")?.unwrap_or(preset_audio);
                 if nv > 256 || na > 256 {
                     return Err(bad("file.newSequence", "at most 256 video and 256 audio tracks are supported"));
                 }
@@ -1310,17 +1337,6 @@ fn build() -> Vec<CommandSpec> {
                 Ok(json!({"sequence": id.0}))
             })
         ),
-        query!("sequence.presets", "List Sequence Presets", "{}", |_, _| {
-            Ok(Value::Array(
-                filmcraft_project::sequence_presets_cached()
-                    .iter()
-                    .map(|p| {
-                        json!({"group": p.group, "name": p.name, "width": p.width, "height": p.height, "fps": p.frame_rate.as_f64(),
-                               "fpsNum": p.frame_rate.num, "fpsDen": p.frame_rate.den, "pixelAspect": p.par})
-                    })
-                    .collect(),
-            ))
-        }),
         cmd!("file.newBin", "Bin", ["File", "New"], Some("Cmd+B"), r#"{"name":str,"parent":binId?}"#, always, |s, p| {
             let n = str_p(p, "name").unwrap_or("New Bin").to_string();
             let parent = u64_p(p, "parent").map(filmcraft_project::BinId);
@@ -3512,6 +3528,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::masks::commands());
     v.extend(crate::presets::commands());
     v.extend(crate::export_tools::commands());
+    v.extend(crate::sequence_presets::commands());
     v.extend(crate::transcript::commands());
     v.extend(crate::panels::commands());
     v.extend(crate::scopes::commands());
