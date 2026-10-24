@@ -728,6 +728,7 @@ impl Session {
             return Err(e);
         }
         self.exec_depth += 1;
+        let started = web_time::Instant::now();
         // Last-resort guard: a panic in a command (a bug that escaped the never-crash rules)
         // becomes an error for the caller (UI, CLI, control channel, MCP) instead of taking the
         // session and its unsaved project down. The panic hook has logged where it happened.
@@ -735,6 +736,7 @@ impl Session {
             .unwrap_or_else(|_| Err(EngineError::Other(format!("internal error in `{id}` (see the crash log); the command did not complete"))));
         self.exec_depth -= 1;
         if self.exec_depth == 0 {
+            log_command(id, &params, &r, started.elapsed());
             source_monitor::track_history(self);
         }
         // source graphics: an edited instance updates the shared layers and the other instances
@@ -1232,6 +1234,39 @@ pub fn media_duration(p: &Project, _pool: &MediaPool, id: ItemId) -> Option<Tick
 
 /// Subclips of subclips followed before giving up (real projects nest one or two deep).
 const MAX_SUBCLIP_CHAIN: usize = 16;
+
+/// A command at or above this many milliseconds is logged as a warning: the UI thread (which runs
+/// the commands a user gives) was blocked that long.
+const SLOW_COMMAND_MS: u128 = 100;
+
+/// The app log tells the story of a session: what the user did (opening and saving projects,
+/// importing, sequences, exports, proxies, Source Settings) and every command slow enough to
+/// freeze the window. Other commands stay out of the log (drags execute many).
+fn log_command(id: &str, params: &Value, r: &Result<Value>, took: std::time::Duration) {
+    const NOTABLE: [&str; 10] =
+        ["file.", "sequence.open", "sequence.new", "export.", "proxy.", "clip.sourceSettings", "clip.interpretFootage", "project.", "playback.", "lut."];
+    let ms = took.as_millis();
+    let slow = ms >= SLOW_COMMAND_MS;
+    if !slow && !NOTABLE.iter().any(|n| id.starts_with(n)) {
+        return;
+    }
+    // a short summary of the parameters: how many paths or items, never their contents
+    let mut what = String::new();
+    for key in ["paths", "items"] {
+        if let Some(n) = params.get(key).and_then(Value::as_array).map(Vec::len) {
+            what.push_str(&format!(" {n} {key}"));
+        }
+    }
+    let outcome = match r {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("failed: {e}"),
+    };
+    if slow {
+        log::warn!("command {id}{what} took {ms} ms ({outcome}); the window did not respond meanwhile");
+    } else {
+        log::info!("command {id}{what} ({ms} ms, {outcome})");
+    }
+}
 
 #[cfg(test)]
 mod aaf_omf_tests;

@@ -61,6 +61,7 @@ pub mod source_playback;
 pub mod state;
 pub mod theme;
 mod theme_favorites;
+pub mod ui_timing;
 pub mod widgets;
 
 use std::collections::HashMap;
@@ -371,6 +372,8 @@ pub struct FilmcraftApp {
     timeline_view_last: Option<filmcraft_engine::project::SequenceView>,
     pub fps: f32,
     last_time: f64,
+    /// Wall time of each frame's own work, for `perf.stats.ui` and the slow-frame log.
+    pub ui_timing: ui_timing::UiTiming,
     bindings: Vec<menus::KeyBinding>,
     /// Shortcut-set revision `bindings` were built from.
     bindings_rev: u64,
@@ -602,6 +605,7 @@ impl FilmcraftApp {
             timeline_view_last: None,
             fps: 60.0,
             last_time: 0.0,
+            ui_timing: ui_timing::UiTiming::default(),
             bindings: Vec::new(),
             bindings_rev: 0,
             menu_sent: Vec::new(),
@@ -2130,7 +2134,27 @@ impl eframe::App for FilmcraftApp {
         }
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.ui_timing.begin();
+        self.logic_pass(ctx, frame);
+        self.ui_timing.end(ui_timing::Half::Logic);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.ui_timing.begin();
+        self.ui_pass(ui, frame);
+        self.ui_timing.end(ui_timing::Half::Panels);
+    }
+
+    fn on_exit(&mut self) {
+        // Flush the recovery journal and stop the auto-save worker; a session with nothing unsaved
+        // removes its journal, one with unsaved changes keeps it for the next launch.
+        self.session.shutdown();
+    }
+}
+
+impl FilmcraftApp {
+    fn logic_pass(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // a native file dialog's answer first, so the panels draw what it chose (#260)
         self.poll_native_dialog(ctx);
         if !self.styled {
@@ -2184,13 +2208,7 @@ impl eframe::App for FilmcraftApp {
         self.collect_screenshots(ctx);
     }
 
-    fn on_exit(&mut self) {
-        // Flush the recovery journal and stop the auto-save worker; a session with nothing unsaved
-        // removes its journal, one with unsaved changes keeps it for the next launch.
-        self.session.shutdown();
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui_pass(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if !self.fonts_ready {
             ui.ctx().request_repaint();
             return;
