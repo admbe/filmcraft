@@ -43,6 +43,8 @@ pub fn stats(app: &FilmcraftApp) -> Value {
     v["monitor"] = json!({
         "frame": app.program_picture().map(|k| k.frame),
         "revision": app.program_picture().map(|k| k.revision),
+        // the scale it was made at, in thousandths (1000: full resolution)
+        "scaleMilli": app.program_picture().map(|k| k.size),
         "projectRevision": app.session.revision,
         "playheadFrame": app.session.active_sequence().map(|q| q.settings.frame_rate.frame_at(app.session.playhead())),
     });
