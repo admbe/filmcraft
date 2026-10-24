@@ -374,6 +374,9 @@ pub struct FilmcraftApp {
     /// becomes [`Self::pending_timeline_drop`], so drops that finish in the same frame, or while
     /// the Timeline is not shown, are all placed.
     ready_drops: std::collections::VecDeque<(Vec<filmcraft_engine::project::ItemId>, egui::Pos2)>,
+    /// The session's `project_generation` the drops above belong to: their item ids mean nothing
+    /// in a replacement project.
+    drops_generation: u64,
     /// Files being dragged over the window from the OS (count, pointer): the Timeline previews where they would land.
     file_drag_hover: Option<(usize, egui::Pos2)>,
     timeline_view_last: Option<filmcraft_engine::project::SequenceView>,
@@ -608,6 +611,7 @@ impl FilmcraftApp {
             pending_timeline_drop: None,
             drop_imports: Vec::new(),
             ready_drops: std::collections::VecDeque::new(),
+            drops_generation: 0,
             file_drag_hover: None,
             timeline_view_last: None,
             fps: 60.0,
@@ -1481,6 +1485,16 @@ impl FilmcraftApp {
 
     /// Import dropped files. With Timeline ▸ drop imports to the timeline, the new items are also
     /// queued to be placed at the pointer (see `timeline::interact`).
+    /// The project was replaced: the drops still to place name items of the old one.
+    fn forget_stale_drops(&mut self) {
+        if self.drops_generation != self.session.project_generation {
+            self.drops_generation = self.session.project_generation;
+            self.drop_imports.clear();
+            self.ready_drops.clear();
+            self.pending_timeline_drop = None;
+        }
+    }
+
     fn handle_drops(&mut self, ctx: &egui::Context) {
         // While files hover, the OS sends no cursor events: poll the cursor each frame to draw the Timeline preview.
         let hovering = ctx.input(|i| i.raw.hovered_files.len());
@@ -1870,6 +1884,7 @@ impl FilmcraftApp {
                 filmcraft_engine::Event::ProjectChanged { .. } => {}
             }
         }
+        self.forget_stale_drops();
         // a drop whose import was cancelled (the project was replaced) never finishes
         let running = &self.session.background_imports;
         self.drop_imports.retain(|d| running.iter().any(|p| p.job == d.0));
@@ -1910,11 +1925,14 @@ impl FilmcraftApp {
         let body = egui::Rect::from_min_max(egui::pos2(full.min.x + 1.0, header.max.y + 1.0), egui::pos2(full.max.x - 1.0, full.max.y - status_h - 2.0));
         // a finished drop waits while the Timeline is not drawn (Import or Export mode), and the
         // next one gets its frame without waiting for input
-        if self.ui.mode == state::Mode::Edit && self.pending_timeline_drop.is_none() {
-            self.pending_timeline_drop = self.ready_drops.pop_front();
-        }
-        if !self.ready_drops.is_empty() {
-            ctx.request_repaint();
+        self.forget_stale_drops();
+        if self.ui.mode == state::Mode::Edit {
+            if self.pending_timeline_drop.is_none() {
+                self.pending_timeline_drop = self.ready_drops.pop_front();
+            }
+            if !self.ready_drops.is_empty() {
+                ctx.request_repaint();
+            }
         }
         match self.ui.mode {
             state::Mode::Edit => self.dock_area(ui, body),

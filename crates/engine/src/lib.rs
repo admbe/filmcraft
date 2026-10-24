@@ -456,6 +456,9 @@ pub struct Session {
     pub media_jobs: Vec<proxies::PendingJob>,
     /// Imports whose files are still opening in the background (`file.import {async: true}`).
     pub background_imports: Vec<background_import::Pending>,
+    /// How many times the project was replaced (new, open, revert, recover, close…): a frontend
+    /// holding item ids for later (a drop still to place) drops them when this changes.
+    pub project_generation: u64,
     /// Mask tracking jobs whose keyframes are still being written.
     pub mask_jobs: Vec<masks::PendingTrack>,
     /// Scene Edit Detection jobs whose results are applied when they finish.
@@ -563,6 +566,7 @@ impl Session {
             offline: Default::default(),
             media_jobs: Vec::new(),
             background_imports: Vec::new(),
+            project_generation: 0,
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
             presets: Default::default(),
@@ -1086,6 +1090,13 @@ impl Session {
         {
             self.state.gap_selection = None;
         }
+    }
+
+    /// The project is about to be replaced: what still belongs to it (background imports, ids a
+    /// frontend holds) is dropped.
+    pub(crate) fn replacing_project(&mut self) {
+        background_import::cancel_all(self);
+        self.project_generation = self.project_generation.wrapping_add(1);
     }
 
     fn bump(&mut self) {

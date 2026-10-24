@@ -206,6 +206,33 @@ fn a_drop_that_finishes_in_another_mode_is_placed_back_in_edit() {
     assert_eq!(clip_counts(&h), (1, 0), "placed at the drop point back in Edit mode; status: {}", h.state().ui.status);
 }
 
+/// A drop waiting for the Timeline holds item ids of its project. When another project was
+/// opened meanwhile, the ids were placed in that project, where the same id can be another item.
+#[test]
+fn a_waiting_drop_is_forgotten_when_the_project_is_replaced() {
+    let mut h = harness();
+    let at = point_on_row(&h, "timeline.track.V1.target");
+    pointer_to(&mut h, at);
+    let file = still("drop_then_replaced.png");
+    h.input_mut().dropped_files.push(std::sync::Arc::new(OsFile(file.clone())));
+    step(&mut h);
+    h.input_mut().dropped_files.clear();
+    h.state_mut().ui.mode = filmcraft_ui_egui::state::Mode::Import;
+    settle_imports(&mut h);
+    let dropped = *h.state().session.project.items.iter().find(|(_, it)| it.name == "drop_then_replaced.png").map(|(id, _)| id).expect("imported");
+    // the same project again, so the next import gets the id the waiting drop holds
+    let s = &mut h.state_mut().session;
+    s.execute("file.openDemoProject", json!({})).unwrap();
+    s.execute("file.newSequence", json!({"name":"Drop test","width":1280,"height":720,"fps":24})).unwrap();
+    let r = s.execute("file.import", json!({"paths": [file.to_string_lossy()]})).unwrap();
+    assert_eq!(r["items"][0].as_u64(), Some(dropped.0), "the replacement project has an item with the dropped id");
+    h.state_mut().ui.mode = filmcraft_ui_egui::state::Mode::Edit;
+    for _ in 0..3 {
+        step(&mut h);
+    }
+    assert_eq!(clip_counts(&h), (0, 0), "nothing from the old project's drop is placed; status: {}", h.state().ui.status);
+}
+
 #[test]
 fn still_dropped_on_an_audio_row_goes_to_the_video_track_without_error() {
     // a video-only item over an audio row: the picture takes the matching video track, no error

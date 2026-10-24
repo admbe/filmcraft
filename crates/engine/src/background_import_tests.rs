@@ -131,7 +131,9 @@ fn replacing_the_project_cancels_its_background_imports() {
         let mut s = Session::default();
         let r = s.execute("file.import", json!({ "paths": paths, "async": true })).unwrap();
         let job = r["importJob"].as_u64().unwrap();
+        let generation = s.project_generation;
         s.execute(replace[0].as_str().unwrap(), replace[1].clone()).unwrap();
+        assert_eq!(s.project_generation, generation + 1, "{replace}: frontends can tell the project was replaced");
         assert!(s.background_imports.is_empty(), "{replace}: the import is dropped with its project");
         let progress = s.jobs.iter().find(|j| j.id == job).unwrap().progress.clone();
         assert!(progress.cancel.load(Ordering::Relaxed), "{replace}: its job is cancelled");
