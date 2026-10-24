@@ -377,13 +377,20 @@ impl MediaPool {
     /// and take its source. A thread that waited but found no source (the opener gave up, or
     /// the host is still fetching the bytes) claims the open itself.
     fn claim_open(&self, item: ItemId, key: &str) -> Claimed<'_> {
+        let cached = || {
+            let sources = self.sources.read().unwrap_or_else(|e| e.into_inner());
+            sources.get(&item).filter(|(k, _)| k.is_empty() || k == key).map(|(_, s)| s.clone())
+        };
         let mut opening = self.opening.lock().unwrap_or_else(|e| e.into_inner());
+        // an opener may have finished between the caller's look at the cache and this lock
+        // (openers store their source before they give up the claim)
+        if let Some(s) = cached() {
+            return Claimed::Opened(s);
+        }
         while opening.contains(&item) {
             opening = self.opened.wait(opening).unwrap_or_else(|e| e.into_inner());
-            if let Some((k, s)) = self.sources.read().unwrap_or_else(|e| e.into_inner()).get(&item)
-                && (k.is_empty() || *k == key)
-            {
-                return Claimed::Opened(s.clone());
+            if let Some(s) = cached() {
+                return Claimed::Opened(s);
             }
         }
         opening.insert(item);
@@ -871,6 +878,27 @@ mod tests {
         pool.clear();
         assert!(pool.source_for(&project, item, &services).is_some());
         assert_eq!(services.1.load(Ordering::Relaxed), 2);
+    }
+
+    /// A thread that missed the cache while another was opening the item, and asks for the claim
+    /// only after that opener stored its source and let the claim go, takes that source: it used
+    /// to find no claim, claim one itself and open the item a second time.
+    #[test]
+    fn a_claim_after_the_opener_finished_takes_its_source() {
+        let info = GeneratorSource::new(filmcraft_media::Generator::ColorMatte { color: [0.0; 4] }, 16, 8, Default::default(), filmcraft_time::Tick(100))
+            .info()
+            .clone();
+        let pool = MediaPool::default();
+        let item = ItemId(1);
+        // the opener's work, as it leaves the pool: source stored, no claim held
+        pool.insert_file(item, "/media/a.mov", Arc::new(PartlyDecodable(info)));
+        let stored = pool.cached(item).unwrap();
+        match pool.claim_open(item, "file:/media/a.mov") {
+            Claimed::Opened(s) => assert!(Arc::ptr_eq(&s, &stored)),
+            Claimed::Mine(_) => panic!("claimed a second open of a source already stored"),
+        }
+        // a source stored under another key (the file relinked) is not taken
+        assert!(matches!(pool.claim_open(item, "file:/media/b.mov"), Claimed::Mine(_)));
     }
 
     /// A source whose video decodes (`OK`) or fails as its mode says, switchable at run time.

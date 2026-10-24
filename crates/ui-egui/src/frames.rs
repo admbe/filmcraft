@@ -698,8 +698,13 @@ pub fn playback_plan(render_cost: f64, fps: f64, workers: usize) -> (i64, i64) {
     if load <= 1.0 {
         return (1, 1);
     }
-    (frames_per_job.ceil() as i64, load.ceil() as i64)
+    // a hostile frame rate (or cost) must not make a plan that walks or spans more than this
+    let frames = |v: f64| (v.ceil() as i64).clamp(1, PLAN_FRAMES_MAX);
+    (frames(frames_per_job), frames(load))
 }
+
+/// The most frames ahead a plan starts or strides: 10 s at 60 fps.
+const PLAN_FRAMES_MAX: i64 = 600;
 
 /// The patterns a throughput-bound plan may keep, `(keep, of)` frames, densest first: every
 /// frame, three of four, two of three, every second, two of five, three of eight, every third,
@@ -766,8 +771,8 @@ pub fn throughput_plan(model: SourceRate, fps: f64, workers: usize, previous: Op
         Some(r) => choose_pattern(r, previous),
         None => (1, 1),
     };
-    let lead = (model.latency * fps * 1.25).ceil() as i64 + 1;
-    (lead.clamp(1, 600), keep, of)
+    let lead = ((model.latency * fps * 1.25).ceil() as i64).saturating_add(1);
+    (lead.clamp(1, PLAN_FRAMES_MAX), keep, of)
 }
 
 /// What the source delivers against what the sequence needs: the lesser of the source's rate
@@ -1046,7 +1051,7 @@ impl FrameServer {
                 let lag = (dir > 0 && judging).then(|| self.lag_of(key, in_use));
                 let (lt, keep, of) = self.throughput_plan(m, fps, lag);
                 // the sparser of the two
-                let (keep, of) = if keep * s < of { (keep, of) } else { (1, s) };
+                let (keep, of) = if keep.saturating_mul(s) < of { (keep, of) } else { (1, s) };
                 (l.max(lt), keep, of, true)
             }
         };
@@ -1080,7 +1085,7 @@ impl FrameServer {
         // Queued frames beyond the planned run are stale: an ordinary source may keep a few
         // (its decoder reaches them in order anyway), a throughput-bound one only a pattern's
         // worth (its decoder would spend the look-ahead on them and evict the frames due next).
-        let mut span = (lead + ahead * of) * step + if anchored { of * step } else { 26 };
+        let mut span = lead.saturating_add(ahead.saturating_mul(of)).saturating_mul(step).saturating_add(if anchored { of.saturating_mul(step) } else { 26 });
         if preroll && let Some(m) = model {
             // A throughput-bound source's planned run as well, from right after the preroll
             // frames: the clock has not started, so every frame decoded now is ahead of it,
@@ -1094,7 +1099,7 @@ impl FrameServer {
                 }
                 prio += 1;
             }
-            span = span.max((lt + n * of) * step + of * step);
+            span = span.max(lt.saturating_add(n.saturating_mul(of)).saturating_mul(step).saturating_add(of.saturating_mul(step)));
         }
         let (target, rev, cur) = (key.target, key.revision, key.frame);
         // Queued frames behind the playhead are late; a running one on a throughput-bound
@@ -1184,7 +1189,7 @@ impl FrameServer {
                 let previous = self.shared.throughput.lock().unwrap_or_else(|e| e.into_inner()).pattern;
                 let (lt, keep, of) = throughput_plan(m, fps, self.shared.workers, previous);
                 let (keep, of) = previous.unwrap_or((keep, of));
-                let (keep, of) = if keep * s < of { (keep, of) } else { (1, s) };
+                let (keep, of) = if keep.saturating_mul(s) < of { (keep, of) } else { (1, s) };
                 (l.max(lt), keep, of)
             }
             None => (l, 1, s),
@@ -1575,8 +1580,8 @@ fn render_job(job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Services>, pr
 #[cfg(test)]
 mod tests {
     use super::{
-        PlaybackMeter, SPARSEST, SourceRate, Target, Throughput, background_work, choose_pattern, eviction_key, in_pattern, lookahead, next_sparser,
-        planned_frames, playback_plan, throughput_plan,
+        PLAN_FRAMES_MAX, PlaybackMeter, SPARSEST, SourceRate, Target, Throughput, background_work, choose_pattern, eviction_key, in_pattern, lookahead,
+        next_sparser, planned_frames, playback_plan, throughput_plan,
     };
     use filmcraft_media::FrameDelivery;
     use filmcraft_project::ItemId;
@@ -1612,6 +1617,21 @@ mod tests {
         // 0.5 s of effects per frame at 24 fps on 6 workers: 12 frames pass while one renders,
         // so start 12 ahead, and every 3rd frame is what 6 workers can finish
         assert_eq!(playback_plan(0.5, 24.0, 6), (12, 3));
+    }
+
+    #[test]
+    fn hostile_frame_rates_and_costs_plan_bounded_runs() {
+        for fps in [f64::MAX, 1e300, f64::INFINITY, f64::NAN, -1.0, 0.0] {
+            for cost in [f64::MAX, 1e9, 0.04] {
+                let (lead, stride) = playback_plan(cost, fps, 4);
+                assert!((1..=PLAN_FRAMES_MAX).contains(&lead) && (1..=PLAN_FRAMES_MAX).contains(&stride), "{cost} at {fps}: {lead}, {stride}");
+                let (lead, keep, of) = throughput_plan(SourceRate { rate: Some(1.0), latency: cost, latency_slow: cost }, fps, 4, None);
+                assert!((1..=PLAN_FRAMES_MAX).contains(&lead) && keep >= 1 && of >= keep, "{cost} at {fps}: {lead} {keep}/{of}");
+                // the sparser plan schedule_playback picks, walked out to a full look-ahead
+                let (keep, of) = if keep.saturating_mul(stride) < of { (keep, of) } else { (1, stride) };
+                assert!(planned_frames(i64::MAX - 5, 1, 2, lead, keep, of, 24, true).len() <= 24);
+            }
+        }
     }
 
     #[test]
