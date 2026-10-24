@@ -197,8 +197,12 @@ New ▸ Desqueezed Sequence From Clip, `file.newDesqueezedSequenceFromClip`, ena
 non-square pixels) and `file.newSequence {fromItem, desqueeze: true}` (the Project panel's New
 Desqueezed Sequence From Clip) make a square-pixel sequence at the clip's display size, width x
 squeeze rounded to the nearest even width (6048 x 3402 at an exact 1.33 is 8044 x 3402, the
-`6K Anamorphic 1.33x desqueezed 8044x3402 <rate>` presets); the result's `desqueezed` says whether
-there was a squeeze. A clip whose display size misses the frame by less than a pixel is scaled to
+`6K Anamorphic 1.33x desqueezed 8044x3402 <rate>` presets); both results' `desqueezed` says
+whether there was a squeeze. A subclip makes the sequence of its parent media and edits in with its
+own range. `sequence.settings` renames the sequence's preset after a picture change (size, rate,
+pixels) unless the preset still matches. Export settings' `pixelAspect` is `[num, den]` or
+`"matchSource"` (the default: the sequence's pixels); `null`, which older saved settings and presets
+hold, means square pixels. A clip whose display size misses the frame by less than a pixel is scaled to
 fill it exactly. LUTs: `lut.import {path, name?}`, `lut.list`,
 `lut.remove {id}`, `lut.export {lut, path, format?}`, `lumetri.setInputLut` / `lumetri.setLook
 {clip?, lut: lib:<id>|builtin:<id>|"", path?}`, `lumetri.setSection {clip?, section, on?}`,
