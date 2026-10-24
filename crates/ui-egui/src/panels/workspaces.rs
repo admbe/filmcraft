@@ -30,11 +30,7 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
     }
     if let Some(page) = id.strip_prefix("window.page.") {
         let Some(name) = EVOLVE_PAGES.iter().find(|n| slug(n) == page) else { return Some(Err(format!("unknown page `{page}`"))) };
-        if let Err(e) = app.set_workspace_set(WorkspaceSet::Evolve) {
-            return Some(Err(e));
-        }
-        app.set_workspace(name);
-        return Some(Ok(json!({"workspace": name, "workspaceSet": WorkspaceSet::Evolve.id()})));
+        return Some(app.select_in_workspace_set(WorkspaceSet::Evolve, name).map(|()| json!({"workspace": name, "workspaceSet": WorkspaceSet::Evolve.id()})));
     }
     let ws = id.strip_prefix("window.workspace.")?;
     let arg = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
@@ -69,10 +65,7 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
             // a built-in workspace of the other set (a Standard-set key pressed on a Evolve page,
             // a Evolve page asked for in the Standard set): switch sets and show it
             None => match WorkspaceSet::ALL.into_iter().find_map(|set| set.builtins().iter().find(|n| slug(n) == key).map(|n| (set, *n))) {
-                Some((set, n)) => app.set_workspace_set(set).map(|()| {
-                    app.set_workspace(n);
-                    json!({"workspace": n, "workspaceSet": set.id()})
-                }),
+                Some((set, n)) => app.select_in_workspace_set(set, n).map(|()| json!({"workspace": n, "workspaceSet": set.id()})),
                 None => Err(format!("unknown workspace `{key}`")),
             },
         },

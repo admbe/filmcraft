@@ -150,13 +150,11 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                     None => return err(format!("unknown tool `{t}`")),
                 }
             }
+            // a failed save of the set is reported after the requested workspace is shown
+            let mut set_saved = Ok(());
             if let Some(set) = s("workspaceSet") {
                 match crate::dock::WorkspaceSet::from_name(set) {
-                    Some(set) => {
-                        if let Err(e) = app.set_workspace_set(set) {
-                            return err(e);
-                        }
-                    }
+                    Some(set) => set_saved = app.set_workspace_set(set),
                     None => return err("unknown workspace set (standard, evolve)"),
                 }
             }
@@ -165,6 +163,9 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                     Some(w) => app.set_workspace(&w),
                     None => return err(format!("unknown workspace `{w}`")),
                 }
+            }
+            if let Err(e) = set_saved {
+                return err(e);
             }
             if let Some(m) = s("mode") {
                 app.ui.mode = match m.to_ascii_lowercase().as_str() {

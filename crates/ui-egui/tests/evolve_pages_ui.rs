@@ -230,6 +230,20 @@ fn workspace_set_switch_completes_when_the_file_cannot_be_written() {
     assert_eq!((d.app().workspaces.set, d.workspace().as_str()), (WorkspaceSet::Evolve, "Edit"));
     assert_eq!(d.app().ui.dock, filmcraft_ui_egui::dock::evolve_page("Edit"));
     assert!(d.app().ui.status.contains("saving workspaces"), "{}", d.app().ui.status);
+    // a page or workspace asked for by name still comes up (in its set), and the error is returned
+    for (command, set, name) in [
+        ("window.workspace.assembly", WorkspaceSet::Standard, "Assembly"),
+        ("window.page.color", WorkspaceSet::Evolve, "Color"),
+        ("window.workspace.learning", WorkspaceSet::Standard, "Learning"),
+    ] {
+        let r = d.call("ui.menu.invoke", json!({"command": command, "params": {}}));
+        assert_eq!(r["ok"], false, "{command}: {r}");
+        assert_eq!((d.app().workspaces.set, d.workspace().as_str()), (set, name), "{command}");
+        assert_eq!(d.app().ui.dock, filmcraft_ui_egui::dock::workspace_in(set, name), "{command}");
+    }
+    let r = d.call("ui.set", json!({"workspaceSet": "evolve", "workspace": "Audio"}));
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!((d.app().workspaces.set, d.workspace().as_str()), (WorkspaceSet::Evolve, "Audio"));
     let _ = std::fs::remove_dir_all(&data);
 }
 

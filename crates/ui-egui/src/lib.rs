@@ -888,6 +888,15 @@ impl FilmcraftApp {
         Ok(())
     }
 
+    /// Switch to workspace set `set` and show its workspace `name` (a page or a workspace asked for
+    /// by name). The workspace is shown even when `workspaces.json` can't be written; the save
+    /// error is returned after it.
+    pub fn select_in_workspace_set(&mut self, set: dock::WorkspaceSet, name: &str) -> Result<(), String> {
+        let saved = self.set_workspace_set(set);
+        self.set_workspace(name);
+        saved
+    }
+
     pub fn set_workspace(&mut self, name: &str) {
         self.ui.workspace = name.to_string();
         let layout = dock::saved_docking(&self.workspaces, name);
