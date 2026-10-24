@@ -876,6 +876,10 @@ impl FilmcraftApp {
             next.current = name.clone();
             let saved = self.set_workspaces(next);
             self.set_workspace(&name);
+            // leaving the Deliver page for a set without pages: back to the workspace, not Export mode
+            if !set.has_page_bar() && self.ui.mode == state::Mode::Export {
+                self.ui.mode = state::Mode::Edit;
+            }
             if let Err(e) = saved {
                 self.ui.status = e.clone();
                 return Err(e);

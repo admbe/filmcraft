@@ -232,3 +232,22 @@ fn workspace_set_switch_completes_when_the_file_cannot_be_written() {
     assert!(d.app().ui.status.contains("saving workspaces"), "{}", d.app().ui.status);
     let _ = std::fs::remove_dir_all(&data);
 }
+
+#[test]
+fn leaving_deliver_for_the_standard_set_returns_to_edit_mode() {
+    let data = data_dir("deliver-standard");
+    let mut d = Driver::launch(&data);
+    // Window ▸ Workspace Set ▸ Standard Workspaces from the Deliver page
+    d.menu("window.page.deliver", json!({}));
+    assert_eq!((d.workspace().as_str(), d.app().ui.mode), ("Deliver", Mode::Export));
+    d.ok("ui.set", json!({"workspaceSet": "standard"}));
+    assert_eq!((d.app().workspaces.set, d.workspace().as_str(), d.app().ui.mode), (WorkspaceSet::Standard, "Editing", Mode::Edit));
+    assert_eq!(d.app().ui.dock, filmcraft_ui_egui::dock::workspace("Editing"));
+    // and through a Standard workspace's own command
+    d.menu("window.page.deliver", json!({}));
+    assert_eq!(d.app().ui.mode, Mode::Export);
+    d.menu("window.workspace.assembly", json!({}));
+    assert_eq!((d.app().workspaces.set, d.workspace().as_str(), d.app().ui.mode), (WorkspaceSet::Standard, "Assembly", Mode::Edit));
+    assert_eq!(d.app().ui.dock, filmcraft_ui_egui::dock::workspace("Assembly"));
+    let _ = std::fs::remove_dir_all(&data);
+}
