@@ -662,7 +662,7 @@ fn new_sequence_opens_its_dialog() {
     d.click("sequenceSettings.tab.general");
     assert_eq!(d.label("sequenceSettings.editingMode"), "6K Anamorphic 1.33x 6048x3402 23.976");
     assert_eq!((d.label("sequenceSettings.width"), d.label("sequenceSettings.height")), ("6048".to_string(), "3402".to_string()));
-    assert_eq!(d.label("sequenceSettings.par"), "Anamorphic 1.33x / HD Anamorphic 1080 (1.3333)");
+    assert_eq!(d.label("sequenceSettings.par"), "4:3 / HD Anamorphic 1080 (1.3333)");
     assert_eq!(d.label("sequenceSettings.name"), format!("Sequence {:02}", n0 + 1));
     assert_eq!(d.label("sequenceSettings.timebase"), "23.976 frames/second");
     assert!(d.ids("sequenceSettings.tab.").iter().any(|i| i == "sequenceSettings.tab.tracks"));

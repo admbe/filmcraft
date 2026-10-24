@@ -1015,20 +1015,43 @@ pub fn checked_par(par: (u32, u32)) -> Option<(u32, u32)> {
     Some((n / g, d / g))
 }
 
-/// The pixel aspect ratios Interpret Footage and the sequence presets offer by name (`(label,
-/// ratio)`): square pixels, the standard-definition DV / D1 ratios, and the anamorphic squeezes
-/// (a 1.33x anamorphic lens on a 16:9 sensor gives 4:3 pixels, 1.5x gives 3:2, 2x gives 2:1).
-/// Every ratio is exact in lowest terms; the label shows it rounded.
-pub const STANDARD_PIXEL_ASPECTS: [(&str, (u32, u32)); 8] = [
+/// The pixel aspect ratios Interpret Footage, Sequence Settings and the sequence presets offer by
+/// name (`(label, ratio)`): square pixels, the standard-definition DV / D1 ratios, and the
+/// anamorphic squeezes. A "1.33x" lens squeeze comes two ways and both are kept apart: exactly
+/// 1.33 (133:100, what lens makers call 1.33x; 6048 pixels show 8043.84 wide) and 4:3 (1.3333,
+/// HDV and HD Anamorphic 1080, which older FilmCraft projects also used for 1.33x lenses; 6048
+/// pixels show 8064 wide). 1.5x gives 3:2, 2x gives 2:1. Every ratio is exact in lowest terms;
+/// the label shows it rounded.
+pub const STANDARD_PIXEL_ASPECTS: [(&str, (u32, u32)); 9] = [
     ("Square Pixels (1.0)", (1, 1)),
     ("D1/DV NTSC (0.9091)", (10, 11)),
     ("D1/DV NTSC Widescreen 16:9 (1.2121)", (40, 33)),
     ("D1/DV PAL (1.0940)", (59, 54)),
     ("D1/DV PAL Widescreen 16:9 (1.4587)", (118, 81)),
-    ("Anamorphic 1.33x / HD Anamorphic 1080 (1.3333)", (4, 3)),
+    ("Anamorphic 1.33x, exact (1.33)", (133, 100)),
+    ("4:3 / HD Anamorphic 1080 (1.3333)", (4, 3)),
     ("Anamorphic 1.5x / DVCPRO HD (1.5)", (3, 2)),
     ("Anamorphic 2x (2.0)", (2, 1)),
 ];
+
+pub use filmcraft_media::lens_squeeze_par;
+
+/// The size a picture of `size` storage pixels with `par` pixels is edited at in a square-pixel
+/// sequence: the height stays, the width becomes `width x par` rounded to the nearest even
+/// number of pixels (halves up). Even, because 4:2:0 and 4:2:2 encoders need even widths. A 6048
+/// x 3402 picture with an exact 1.33x squeeze (133:100, 8043.84 wide) is 8044 x 3402; with 4:3
+/// pixels it is 8064 x 3402. Square pixels keep their size; a ratio that makes no sense counts as
+/// square ([`sane_par`]); the width is at least 2 and at most `u32::MAX` rounded down to even.
+pub fn desqueezed_size(size: (u32, u32), par: (u32, u32)) -> (u32, u32) {
+    let (n, d) = sane_par(par);
+    if (n, d) == (1, 1) {
+        return size;
+    }
+    // round(w * n / d / 2) * 2, in integers: (w * n + d) / (2 * d) * 2
+    let halves = (u64::from(size.0) * u64::from(n) + u64::from(d)) / (2 * u64::from(d));
+    let w = halves.saturating_mul(2).clamp(2, u64::from(u32::MAX - 1));
+    (u32::try_from(w).unwrap_or(u32::MAX - 1), size.1)
+}
 
 /// The name of a pixel aspect ratio: its [`STANDARD_PIXEL_ASPECTS`] label, else "Custom (ratio)".
 pub fn pixel_aspect_label(par: (u32, u32)) -> String {
@@ -2354,7 +2377,8 @@ mod tests {
             assert_eq!(checked_par(par), Some(par), "{label}");
             assert_eq!(pixel_aspect_label(par), label);
         }
-        assert_eq!(pixel_aspect_label((8, 6)), "Anamorphic 1.33x / HD Anamorphic 1080 (1.3333)");
+        assert_eq!(pixel_aspect_label((8, 6)), "4:3 / HD Anamorphic 1080 (1.3333)");
+        assert_eq!(pixel_aspect_label((266, 200)), "Anamorphic 1.33x, exact (1.33)");
         assert_eq!(pixel_aspect_label((16, 9)), "Custom (1.7778)");
         assert_eq!(pixel_aspect_label((0, 0)), "Square Pixels (1.0)");
         // 1440 x 1080 with 4:3 pixels is 1920 x 1080 square pixels, and itself in a 4:3 frame
@@ -2363,6 +2387,57 @@ mod tests {
         assert_eq!(conformed_size((1920, 1080), (1, 1), (4, 3)), (1440.0, 1080.0));
         assert_eq!(conformed_size((u32::MAX, u32::MAX), (8, 1), (1, 8)), (u32::MAX as f64 * 64.0, u32::MAX as f64));
         assert_eq!(conformed_size((1440, 1080), (0, 0), (u32::MAX, 1)), (1440.0, 1080.0));
+    }
+
+    #[test]
+    fn the_exact_and_the_four_thirds_squeeze_are_both_kept() {
+        // 1.33x exactly and 4:3 are different ratios with different names
+        assert_eq!(checked_par((133, 100)), Some((133, 100)));
+        assert_ne!(pixel_aspect_label((133, 100)), pixel_aspect_label((4, 3)));
+        assert!((par_ratio((133, 100)) - 1.33).abs() < 1e-12);
+        assert_eq!(conformed_size((6048, 3402), (133, 100), (1, 1)).0, 6048.0 * 1.33);
+        assert_eq!(conformed_size((6048, 3402), (4, 3), (1, 1)), (8064.0, 3402.0));
+        // recorded lens squeezes
+        assert_eq!(lens_squeeze_par(1.33), Some((133, 100)));
+        assert_eq!(lens_squeeze_par(1.330_000_1), Some((133, 100)));
+        assert_eq!(lens_squeeze_par(4.0 / 3.0), Some((4, 3)));
+        assert_eq!(lens_squeeze_par(1.3333), Some((4, 3)));
+        assert_eq!(lens_squeeze_par(1.5), Some((3, 2)));
+        assert_eq!(lens_squeeze_par(1.8), Some((9, 5)));
+        assert_eq!(lens_squeeze_par(2.0), Some((2, 1)));
+        assert_eq!(lens_squeeze_par(1.25), Some((5, 4)));
+        for none in [1.0, 0.0, -1.33, f64::NAN, f64::INFINITY, 9.0, 0.001, 1e300] {
+            assert_eq!(lens_squeeze_par(none), None, "{none}");
+        }
+        // a project from before the exact ratio stored its 1.33x squeeze as 4:3 and reads back so
+        let st: SequenceSettings = serde_json::from_value(serde_json::json!({
+            "width": 6048, "height": 3402, "frame_rate": {"num": 24000, "den": 1001}, "par": [4, 3], "sample_rate": 48000,
+            "drop_frame": false, "preset": "6K Anamorphic 1.33x 6048x3402 23.976", "audio_master": "Stereo", "preview_codec": "ProRes 422",
+            "max_bit_depth": false, "max_render_quality": false, "working_space": "Rec. 709"
+        }))
+        .unwrap();
+        assert_eq!(st.par, (4, 3));
+        assert_eq!(pixel_aspect_label(st.par), "4:3 / HD Anamorphic 1080 (1.3333)");
+        assert_eq!(sequence_preset_of(&st).map(|p| p.name), Some("6K Anamorphic 1.33x 6048x3402 23.976"));
+    }
+
+    #[test]
+    fn desqueezed_sizes_round_to_the_nearest_even_width() {
+        // the rule: width x squeeze, to the nearest even number of pixels; the height stays
+        assert_eq!(desqueezed_size((6048, 3402), (133, 100)), (8044, 3402), "8043.84 -> 8044");
+        assert_eq!(desqueezed_size((6048, 3402), (4, 3)), (8064, 3402));
+        assert_eq!(desqueezed_size((3984, 2240), (133, 100)), (5298, 2240), "5298.72 -> 5298 (5299 is odd)");
+        assert_eq!(desqueezed_size((1440, 1080), (4, 3)), (1920, 1080));
+        assert_eq!(desqueezed_size((4096, 2160), (2, 1)), (8192, 2160));
+        assert_eq!(desqueezed_size((1001, 10), (3, 2)), (1502, 10), "1501.5 -> 1502");
+        assert_eq!(desqueezed_size((1003, 10), (3, 2)), (1504, 10), "1504.5 -> 1504");
+        assert_eq!(desqueezed_size((720, 480), (10, 11)), (654, 480), "654.55 -> 654");
+        // square or nonsensical ratios keep the size; huge sizes saturate, tiny ones stay positive
+        assert_eq!(desqueezed_size((6048, 3402), (1, 1)), (6048, 3402));
+        assert_eq!(desqueezed_size((6048, 3402), (0, 0)), (6048, 3402));
+        assert_eq!(desqueezed_size((u32::MAX, 1), (8, 1)), (u32::MAX - 1, 1));
+        assert_eq!(desqueezed_size((1, 1), (1, 8)), (2, 1));
+        assert_eq!(desqueezed_size((0, 0), (2, 1)), (2, 0));
     }
 
     #[test]

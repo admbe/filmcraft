@@ -107,15 +107,15 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     ui.label(
                         egui::RichText::new(if n == 1 { tlf!("Pixel Aspect Ratio · {n} item", n) } else { tlf!("Pixel Aspect Ratio · {n} items", n) }).strong(),
                     );
-                    let file_label = filmcraft_project::pixel_aspect_label(from_file);
+                    let file_label = crate::i18n::t(&filmcraft_project::pixel_aspect_label(from_file)).to_string();
                     if radio(app, ui, "colorDialog.par.file", pixel_aspect == "file", &tlf!("Use Pixel Aspect Ratio from File: {par}", par = file_label)) {
                         *pixel_aspect = "file".into();
                     }
                     ui.label(tl!("Conform to:"));
-                    // an anamorphic squeeze: a 1.33x lens on a 16:9 sensor records 4:3 pixels
+                    // the anamorphic squeezes: a 1.33x lens exactly (133:100) and the 4:3 pixel apart
                     for (label, (num, den)) in filmcraft_project::STANDARD_PIXEL_ASPECTS {
                         let choice = format!("{num}:{den}");
-                        if radio(app, ui, &format!("colorDialog.par.{num}x{den}"), *pixel_aspect == choice, label) {
+                        if radio(app, ui, &format!("colorDialog.par.{num}x{den}"), *pixel_aspect == choice, crate::i18n::t(label)) {
                             *pixel_aspect = choice;
                         }
                     }
