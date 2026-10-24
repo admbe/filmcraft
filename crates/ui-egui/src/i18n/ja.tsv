@@ -3616,3 +3616,16 @@
 	Open a sequence to search its graphics	シーケンスを開くとグラフィックスを検索できます
 	No text graphics in this sequence. Add text with the Type tool.	このシーケンスにはテキストのグラフィックスがありません。文字ツールでテキストを追加してください。
 	No matching text.	一致するテキストはありません。
+	Pixel Aspect Ratio · {n} item	ピクセル縦横比 · {n} 項目
+	Pixel Aspect Ratio · {n} items	ピクセル縦横比 · {n} 項目
+	Use Pixel Aspect Ratio from File: {par}	ファイルのピクセル縦横比を使用: {par}
+	Conform to:	次に合わせる:
+	Available Presets:	使用可能なプリセット:
+	Preset Description	プリセットの説明
+	{w} x {h}, {rate} fps, square pixels	{w} x {h}、{rate} fps、正方形ピクセル
+	{w} x {h}, {rate} fps, {par}; shown {dw} x {h} ({aspect})	{w} x {h}、{rate} fps、{par}。表示サイズ {dw} x {h}（{aspect}）
+	Custom settings (see the General tab)	カスタム設定（「一般」タブを参照）
+	Match Source ({par})	ソースに合わせる（{par}）
+	Sequence Presets	シーケンスプリセット
+	Choose a preset on the Sequence Presets tab	「シーケンスプリセット」タブでプリセットを選択してください
+	Set by the preset (Sequence Presets tab) or by New Sequence From Clip	プリセット（「シーケンスプリセット」タブ）または「クリップから新規シーケンス」で設定されます

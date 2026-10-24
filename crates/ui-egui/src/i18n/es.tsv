@@ -3617,3 +3617,16 @@
 	Open a sequence to search its graphics	Abre una secuencia para buscar en sus gráficos
 	No text graphics in this sequence. Add text with the Type tool.	Esta secuencia no tiene gráficos con texto. Añade texto con la herramienta Texto.
 	No matching text.	Ningún texto coincide.
+	Pixel Aspect Ratio · {n} item	Proporción de píxeles · {n} elemento
+	Pixel Aspect Ratio · {n} items	Proporción de píxeles · {n} elementos
+	Use Pixel Aspect Ratio from File: {par}	Usar la proporción de píxeles del archivo: {par}
+	Conform to:	Conformar a:
+	Available Presets:	Ajustes preestablecidos disponibles:
+	Preset Description	Descripción del ajuste preestablecido
+	{w} x {h}, {rate} fps, square pixels	{w} x {h}, {rate} fps, píxeles cuadrados
+	{w} x {h}, {rate} fps, {par}; shown {dw} x {h} ({aspect})	{w} x {h}, {rate} fps, {par}; se muestra a {dw} x {h} ({aspect})
+	Custom settings (see the General tab)	Ajustes personalizados (ver la pestaña General)
+	Match Source ({par})	Igual que el origen ({par})
+	Sequence Presets	Ajustes preestablecidos de secuencia
+	Choose a preset on the Sequence Presets tab	Elija un ajuste preestablecido en la pestaña Ajustes preestablecidos de secuencia
+	Set by the preset (Sequence Presets tab) or by New Sequence From Clip	Lo define el ajuste preestablecido (pestaña Ajustes preestablecidos de secuencia) o Nueva secuencia desde clip
