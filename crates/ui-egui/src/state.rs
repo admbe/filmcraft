@@ -809,6 +809,10 @@ pub enum ColorDialog {
         color_space: String,
         #[serde(default = "pixel_aspect_from_file")]
         pixel_aspect: String,
+        /// The user picked a pixel aspect choice: only then does OK send it, so changing just the
+        /// colour space keeps each selected item's own pixel aspect override.
+        #[serde(default)]
+        pixel_aspect_set: bool,
     },
     /// `sequence.colorSettings`.
     Sequence { working_space: String, wide_gamut: bool, auto_tone_map: bool },
