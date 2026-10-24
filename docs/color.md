@@ -82,7 +82,9 @@ opaque pixels or with NaNs measure as zero confidence and set nothing.
 
 **Result.** One entry per clip, in order; a clip that cannot be measured (an audio clip, a clip
 without a picture) is listed under `errors` and the rest proceed. If nothing succeeded the command
-fails with the first error.
+fails with the first error. A sampled frame that does not render is left out: `frames` and `times`
+name only the frames measured, the item lists the others under `failedTimes`, and `errors` gets an
+entry for the clip with those `times`.
 
 ```jsonc
 {
@@ -170,4 +172,7 @@ if good:
 job = run(call, "file.exportMedia", path=out, preset=preset, sequence=seq, wait=False)["job"]
 while any(j["id"] == job and not j.get("finished") for j in run(call, "jobs.list")):
     time.sleep(2)
+done = next((j for j in run(call, "jobs.list") if j["id"] == job), {})
+if (done.get("result") or {}).get("error"):
+    sys.exit(f"export failed: {done['result']['error']}")
 ```

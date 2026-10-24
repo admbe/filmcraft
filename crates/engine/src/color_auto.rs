@@ -36,10 +36,18 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
     }]
 }
 
-/// A sequence with timeline clips or project items selected (or named, see `Session::execute`).
+/// A sequence whose timeline or Project panel selection (or the clips / items named, see
+/// `Session::execute`) reaches a video clip, as [`targets`] finds them: an audio-only selection
+/// leaves the command disabled.
 fn has_targets(s: &Session) -> std::result::Result<(), String> {
     has_seq(s)?;
-    if s.state.selection.is_empty() && s.state.project_selection.is_empty() { Err("select clips (timeline or Project panel)".into()) } else { Ok(()) }
+    targets(s, &Value::Null).map(|_| ()).map_err(|_| {
+        if s.state.selection.is_empty() && s.state.project_selection.is_empty() {
+            "select video clips (timeline or Project panel)".into()
+        } else {
+            "not a video clip: select video clips, or Project items they use".into()
+        }
+    })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -135,7 +143,10 @@ fn auto(s: &mut Session, p: &Value) -> Result<Value> {
     let mut developed: Vec<ItemId> = Vec::new();
     for clip in clips {
         match correct_clip(s, clip, cfg, &mut developed) {
-            Ok(v) => done.push(v),
+            Ok(v) => {
+                errors.extend(sample_error(&v));
+                done.push(v);
+            }
             Err(e) => errors.push(json!({"clip": clip.0, "error": e.to_string()})),
         }
     }
@@ -145,6 +156,31 @@ fn auto(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(EngineError::Other(first["error"].as_str().unwrap_or("auto correct failed").to_string()));
     }
     Ok(json!({"corrected": done.len(), "items": done, "errors": errors}))
+}
+
+/// Render each of `times`: the frames that rendered, with their times, and the times that did not.
+fn render_samples<T>(times: &[Tick], mut render: impl FnMut(Tick) -> Option<T>) -> (Vec<(Tick, T)>, Vec<Tick>) {
+    let mut frames = Vec::new();
+    let mut failed = Vec::new();
+    for t in times {
+        match render(*t) {
+            Some(img) => frames.push((*t, img)),
+            None => failed.push(*t),
+        }
+    }
+    (frames, failed)
+}
+
+/// The `errors` entry for a clip measured from fewer frames than asked: the times that did not
+/// render.
+fn sample_error(v: &Value) -> Option<Value> {
+    let failed = v.get("failedTimes")?.as_array().filter(|a| !a.is_empty())?;
+    let measured = v.get("frames").and_then(Value::as_u64).unwrap_or(0);
+    Some(json!({
+        "clip": v.get("clip"),
+        "error": format!("{} sampled frame(s) did not render; measured from the other {measured}", failed.len()),
+        "times": failed,
+    }))
 }
 
 /// Where the clip's frames are measured: the playhead clamped into the clip, or `n` frames
@@ -181,25 +217,26 @@ fn correct_clip(s: &mut Session, clip: ClipId, cfg: Config, developed: &mut Vec<
     }
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let opts = filmcraft_render::RenderOptions { scale: 0.25, working_output: true, ..Default::default() };
-    let frames: Vec<filmcraft_render::Image> = times
-        .iter()
-        .filter_map(|t| filmcraft_render::render_clip(&probe, seq_id, clip, *t, opts, &provider))
-        .map(|img| filmcraft_render::color_match::shrink(&img, 192))
-        .collect();
+    let (frames, failed) = render_samples(&times, |t| {
+        filmcraft_render::render_clip(&probe, seq_id, clip, t, opts, &provider).map(|img| filmcraft_render::color_match::shrink(&img, 192))
+    });
     if frames.is_empty() {
         return Err(bad(CMD, format!("clip {} has no picture", clip.0)));
     }
-    let refs: Vec<&filmcraft_render::Image> = frames.iter().collect();
+    let refs: Vec<&filmcraft_render::Image> = frames.iter().map(|(_, img)| img).collect();
     let a = auto_correct::analyse(&refs, cfg.options);
     let mut out = json!({
         "clip": clip.0,
         "item": item.0,
         "frames": frames.len(),
-        "times": times.iter().map(|t| t.0).collect::<Vec<_>>(),
+        "times": frames.iter().map(|(t, _)| t.0).collect::<Vec<_>>(),
         "measured": a,
         "confidence": a.confidence,
         "applied": false,
     });
+    if !failed.is_empty() {
+        out["failedTimes"] = json!(failed.iter().map(|t| t.0).collect::<Vec<_>>());
+    }
     if !cfg.apply {
         return Ok(out);
     }

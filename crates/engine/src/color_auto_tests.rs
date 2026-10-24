@@ -204,6 +204,41 @@ fn the_timeline_selection_counts_only_its_video_clips() {
 }
 
 #[test]
+fn frames_that_do_not_render_are_reported_not_measured() {
+    use filmcraft_time::Tick;
+    let times = [Tick(10), Tick(20), Tick(30)];
+    let (frames, failed) = super::render_samples(&times, |t| (t != Tick(20)).then_some(t.0 * 2));
+    assert_eq!(frames, vec![(Tick(10), 20), (Tick(30), 60)]);
+    assert_eq!(failed, vec![Tick(20)]);
+    // the result names only the measured times; the failed ones become an `errors` entry
+    let v = json!({"clip": 7, "frames": 2, "times": [10, 30], "failedTimes": [20]});
+    let e = super::sample_error(&v).expect("an error entry");
+    assert_eq!((e["clip"].clone(), e["times"].clone()), (json!(7), json!([20])), "{e}");
+    assert!(e["error"].as_str().unwrap().contains("measured from the other 2"), "{e}");
+    assert!(super::sample_error(&json!({"clip": 7, "frames": 3})).is_none());
+    assert!(super::sample_error(&json!({"clip": 7, "failedTimes": []})).is_none());
+    // a demo clip renders every sample: no failed times, no errors
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let r = s.execute("lumetri.auto", json!({"clip": clip.0, "frames": "sampled", "samples": 3, "apply": false})).unwrap();
+    assert_eq!((r["items"][0]["times"].as_array().map(Vec::len), r["errors"].as_array().map(Vec::len)), (Some(3), Some(0)), "{r}");
+    assert!(r["items"][0].get("failedTimes").is_none(), "{r}");
+}
+
+#[test]
+fn an_audio_only_selection_leaves_the_command_disabled() {
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let audio = s.active_sequence().unwrap().audio_tracks[0].items[0].id;
+    s.state.selection = vec![audio];
+    assert!(!s.is_enabled("lumetri.auto"), "audio only");
+    s.state.selection = vec![clip, audio];
+    assert!(s.is_enabled("lumetri.auto"), "a video clip with its audio");
+    s.state.selection = vec![];
+    assert!(!s.is_enabled("lumetri.auto"), "nothing selected");
+}
+
+#[test]
 fn the_command_is_in_the_color_menu_and_the_registry() {
     let spec = crate::find_command("lumetri.auto").expect("registered");
     assert_eq!((spec.label, spec.menu), ("Auto Correct", &["Color"][..]));
