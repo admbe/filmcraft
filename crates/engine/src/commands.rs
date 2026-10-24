@@ -660,6 +660,7 @@ pub fn import_bytes(s: &mut Session, path: &str, bytes: std::sync::Arc<[u8]>, bi
 pub(crate) type Prefetched = Result<(filmcraft_media::SharedSource, filmcraft_project::MediaIdentity)>;
 
 /// Most media files opened at once by [`open_concurrently`].
+#[cfg(not(target_arch = "wasm32"))]
 const PREFETCH_THREADS: usize = 8;
 
 /// Open `paths` (streamed media files) several at a time, at most [`PREFETCH_THREADS`], handing

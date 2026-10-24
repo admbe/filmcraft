@@ -1214,6 +1214,7 @@ pub(crate) mod peak_cache {
     /// Most peaks a cache file may hold (one per 256 samples at 48 kHz: about 97 hours).
     const MAX_PEAKS: usize = 64 << 20;
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn fnv1a(bytes: &[u8]) -> u64 {
         bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
     }
@@ -1346,6 +1347,7 @@ pub(crate) mod waveforms {
 
     struct Queue {
         jobs: Mutex<VecDeque<Job>>,
+        #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
         ready: Condvar,
     }
 
