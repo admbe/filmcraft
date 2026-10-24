@@ -366,6 +366,10 @@ pub struct FilmcraftApp {
     timeline_view_of: Option<filmcraft_engine::project::ItemId>,
     /// Items imported by an OS file drop, to place on the Timeline at the drop point this frame.
     pending_timeline_drop: Option<(Vec<filmcraft_engine::project::ItemId>, egui::Pos2)>,
+    /// Files dropped from the OS with "drop imports to the timeline": the background import's
+    /// job and the drop point. When the import finishes its items become
+    /// [`Self::pending_timeline_drop`] for the Timeline to place.
+    drop_import: Option<(u64, egui::Pos2)>,
     /// Files being dragged over the window from the OS (count, pointer): the Timeline previews where they would land.
     file_drag_hover: Option<(usize, egui::Pos2)>,
     timeline_view_last: Option<filmcraft_engine::project::SequenceView>,
@@ -598,6 +602,7 @@ impl FilmcraftApp {
             last_timeline_width: 1000.0,
             timeline_view_of: None,
             pending_timeline_drop: None,
+            drop_import: None,
             file_drag_hover: None,
             timeline_view_last: None,
             fps: 60.0,
@@ -1490,19 +1495,19 @@ impl FilmcraftApp {
         }
         if !paths.is_empty() {
             let pointer = self.drop_pointer(ctx);
-            // Dropped on the timeline, the items are needed now to place them; anywhere else the
-            // files open in the background and appear as they do.
-            let to_timeline = pointer.is_some() && self.session.prefs.timeline.drop_import_to_timeline;
-            let imported = self.session.execute("file.import", json!({"paths": paths, "bin": self.import_bin().0, "async": !to_timeline}));
-            if let Ok(v) = imported
-                && let Some(pos) = pointer
-                && self.session.prefs.timeline.drop_import_to_timeline
-            {
-                let items: Vec<filmcraft_engine::project::ItemId> =
-                    v["items"].as_array().map(|a| a.iter().filter_map(|i| i.as_u64()).map(filmcraft_engine::project::ItemId).collect()).unwrap_or_default();
-                if !items.is_empty() {
-                    self.pending_timeline_drop = Some((items, pos));
+            // The files open in the background and appear as they do, wherever they were dropped:
+            // a drop of 353 files imported on the UI thread froze the window for 4.8 s in a field
+            // report. With "drop imports to the timeline" the drop point is kept, and the
+            // Timeline places the items there once the import has added them (ImportFinished).
+            let imported = self.session.execute("file.import", json!({"paths": paths, "bin": self.import_bin().0, "async": true}));
+            match imported {
+                Ok(v) if self.session.prefs.timeline.drop_import_to_timeline => {
+                    if let (Some(pos), Some(job)) = (pointer, v["importJob"].as_u64()) {
+                        self.drop_import = Some((job, pos));
+                    }
                 }
+                Ok(_) => {}
+                Err(e) => self.ui.status = e.to_string(),
             }
         }
     }
@@ -1841,6 +1846,16 @@ impl FilmcraftApp {
                     let _ = self.apply_dock(craft_ui::docking::Action::Activate { panel: PanelKind::Source });
                 }
                 filmcraft_engine::Event::RevealInProject(item) => self.reveal_in_project(item),
+                filmcraft_engine::Event::ImportFinished { job, items } => {
+                    if let Some((want, pos)) = self.drop_import
+                        && want == job
+                    {
+                        self.drop_import = None;
+                        if !items.is_empty() {
+                            self.pending_timeline_drop = Some((items, pos));
+                        }
+                    }
+                }
                 filmcraft_engine::Event::Toast { message, .. } => self.toast = Some((message, ctx.input(|i| i.time))),
                 filmcraft_engine::Event::ProjectChanged { .. } => {}
             }

@@ -109,6 +109,7 @@ pub fn poll(s: &mut Session) {
 fn finish(s: &mut Session, done: Pending) {
     let mut errors = done.errors;
     errors.extend(crate::commands::after_import(s, &done.items));
+    s.events.push(crate::Event::ImportFinished { job: done.job, items: done.items.clone() });
     let secs = done.started.elapsed().as_secs_f64();
     log::info!("import of {} files done in {secs:.1} s: {} added, {} failed", done.paths.len(), done.items.len(), errors.len());
     if !errors.is_empty() {

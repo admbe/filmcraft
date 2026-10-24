@@ -915,15 +915,15 @@ pub(crate) fn audio_placement_specs(clips: &[Vec<u16>], streams: usize) -> Vec<A
 /// (channel format, volume, pan, inserts) without its clips, transitions, lock / mute / solo
 /// state or mixer routing. Returns the ids of all the sequence's audio tracks, in order.
 pub(crate) fn ensure_audio_tracks(p: &mut Project, seq_id: ItemId, first: usize, count: usize, label: &str) -> Result<Vec<TrackId>> {
-    let (have, template) = {
-        let q = p.sequence(seq_id).ok_or(EngineError::NoSequence)?;
-        (q.audio_tracks.len(), q.audio_tracks.get(first).or(q.audio_tracks.last()).cloned())
-    };
+    let have = p.sequence(seq_id).ok_or(EngineError::NoSequence)?.audio_tracks.len();
     let need = first.saturating_add(count);
     if need > crate::sequence_tools::MAX_TRACKS {
         return Err(bad(label, format!("a sequence has at most {} audio tracks", crate::sequence_tools::MAX_TRACKS)));
     }
     if need > have {
+        // the template is copied only when a track is added: it carries the track's clips, and
+        // copying them for every placement made a 353-clip drop quadratic
+        let template = p.sequence(seq_id).and_then(|q| q.audio_tracks.get(first).or(q.audio_tracks.last()).cloned());
         let ids: Vec<(usize, TrackId)> = (have..need).map(|k| (k, TrackId(p.alloc_id()))).collect();
         let q = p.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
         for (k, id) in ids {
@@ -947,6 +947,26 @@ fn place_one(s: &mut Session, p: &Value) -> Result<Value> {
     if crate::sequence_tools::wants_new_track(p) {
         return crate::sequence_tools::place_on_new_tracks(s, p);
     }
+    let one = plan_one(s, p)?;
+    let at = sequence_time_p(s, p, "", "timeline.place")?.unwrap_or(s.playhead());
+    let (at, dur) = on_frame_grid(s.sequence_rate(), at, one.dur);
+    let ids = place_item(s, one.item, TimeRange::new(one.sin, dur), at, one.v, one.a, one.insert, "Place Clip", None)?;
+    Ok(json!({"clips": ids.iter().map(|c| c.0).collect::<Vec<_>>()}))
+}
+
+/// One `timeline.place` item as the session resolves it: the item, its source range (`sin`, and
+/// `dur` before it goes on the frame grid), where its picture and its sound go, and whether it
+/// inserts. Reads the session only, so several can be worked out before one edit places them.
+struct OnePlan {
+    item: ItemId,
+    sin: Tick,
+    dur: Tick,
+    v: Option<TrackId>,
+    a: Option<TrackId>,
+    insert: bool,
+}
+
+fn plan_one(s: &Session, p: &Value) -> Result<OnePlan> {
     let stream_flag = |key: &str| match p.get(key) {
         None => Ok(true),
         Some(Value::Bool(v)) => Ok(*v),
@@ -957,7 +977,6 @@ fn place_one(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("timeline.place", "enable video, audio, or both"));
     }
     let item = item_p(p, "item").ok_or_else(|| bad("timeline.place", "need `item`"))?;
-    let at = sequence_time_p(s, p, "", "timeline.place")?.unwrap_or(s.playhead());
     let tg = s.targeting();
     let pi = s.project.item(item).ok_or_else(|| bad("timeline.place", "no such item"))?;
     let (has_video, has_audio) = s.project.source_streams(item);
@@ -994,15 +1013,16 @@ fn place_one(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let sin = p.get("sourceIn").and_then(Value::as_i64).map(Tick).or(mi).unwrap_or_default();
     let dur = p.get("duration").and_then(Value::as_i64).map(Tick).unwrap_or_else(|| mo.unwrap_or(full) - sin);
-    // The clip goes on the frame grid: its start and its end (`time + duration`) each snap to the
-    // nearest frame, so a sub-frame `time` never pushes the end past the one asked for and the
-    // sequence never ends between frames (#1101).
-    let rate = s.sequence_rate();
+    Ok(OnePlan { item, sin, dur, v, a, insert: bool_p(p, "insert").unwrap_or(false) })
+}
+
+/// The clip goes on the frame grid: its start and its end (`at + dur`) each snap to the nearest
+/// frame, so a sub-frame time never pushes the end past the one asked for and the sequence never
+/// ends between frames (#1101). Returns the start and the duration.
+fn on_frame_grid(rate: filmcraft_time::FrameRate, at: Tick, dur: Tick) -> (Tick, Tick) {
     let end = rate.snap_nearest(Tick(at.0.saturating_add(dur.0)));
     let at = rate.snap_nearest(at);
-    let dur = end - at;
-    let ids = place_item(s, item, TimeRange::new(sin, dur), at, v, a, bool_p(p, "insert").unwrap_or(false), "Place Clip", None)?;
-    Ok(json!({"clips": ids.iter().map(|c| c.0).collect::<Vec<_>>()}))
+    (at, end - at)
 }
 
 /// Most items one `timeline.place` with `items` takes: a larger list is refused, not cut.
@@ -1025,6 +1045,13 @@ fn place_items(s: &mut Session, p: &Value, items: &Value) -> Result<Value> {
         return Err(bad("timeline.place", format!("`items` needs 1 to {MAX_PLACE_ITEMS} item ids")));
     }
     let mut at = sequence_time_p(s, p, "", "timeline.place")?.unwrap_or(s.playhead());
+    // Every item planned from the session, then all placed in one edit: an edit per item copied
+    // the project and the sequence each time (353 files dropped together took 0.8-1.6 s on the
+    // UI thread in a field report). New tracks and sequences placed as their clips keep the
+    // item-by-item path.
+    if !crate::sequence_tools::wants_new_track(p) && !ids.iter().any(|i| places_as_clips(s, *i)) {
+        return place_items_in_one_edit(s, p, &ids, at);
+    }
     s.edit_group("Place Clips", |s| {
         let mut placed = Vec::new();
         // "new" adds a track for the first item only; the rest follow it on that track
@@ -1062,23 +1089,26 @@ fn place_items(s: &mut Session, p: &Value, items: &Value) -> Result<Value> {
     })
 }
 
-/// Place a project item on the timeline (drag from Project, or Insert/Overwrite from source).
-pub(crate) fn place_item(
-    s: &mut Session,
+/// What placing an item needs from the session, worked out before the edit (see [`apply_item`]).
+struct ItemPlan {
     item: ItemId,
-    range: TimeRange,
-    at: Tick,
     vdest: Option<TrackId>,
     adest: Option<TrackId>,
-    insert: bool,
-    label: &str,
-    audio_split: Option<(TimeRange, Tick)>,
-) -> Result<Vec<ClipId>> {
-    let pi = s.project.item(item).ok_or_else(|| bad(label, "no such item"))?.clone();
-    // the nest toggle off: a sequence edits in as its clips (a multi-camera source stays one clip)
-    if s.state.sequences_as_clips && pi.as_sequence().is_some_and(|q| q.multicam.is_none()) {
-        return crate::sequence_tools::place_sequence_clips(s, item, range, at, vdest, adest, insert, label);
-    }
+    has_v: bool,
+    has_a: bool,
+    src_size: (u32, u32),
+    src_par: Option<(u32, u32)>,
+    is_media: bool,
+}
+
+/// Whether `item` is placed as its clips: a sequence with the nest toggle off (a multi-camera
+/// source stays one clip).
+fn places_as_clips(s: &Session, item: ItemId) -> bool {
+    s.state.sequences_as_clips && s.project.item(item).and_then(|pi| pi.as_sequence()).is_some_and(|q| q.multicam.is_none())
+}
+
+fn plan_item(s: &Session, item: ItemId, vdest: Option<TrackId>, adest: Option<TrackId>, label: &str) -> Result<ItemPlan> {
+    let pi = s.project.item(item).ok_or_else(|| bad(label, "no such item"))?;
     let (video, audio) = s.project.source_streams(item);
     let has_v = video && vdest.is_some();
     let has_a = audio && adest.is_some();
@@ -1092,85 +1122,183 @@ pub(crate) fn place_item(
         _ => None,
     }
     .unwrap_or((1920, 1080));
-    // `None`: drawn in the pixels of the sequence it is placed in
-    let src_par = s.project.source_par(item);
+    Ok(ItemPlan {
+        item,
+        vdest,
+        adest,
+        has_v,
+        has_a,
+        src_size,
+        // `None`: drawn in the pixels of the sequence it is placed in
+        src_par: s.project.source_par(item),
+        is_media: matches!(pi.kind, ItemKind::Media(_) | ItemKind::Subclip { .. }),
+    })
+}
+
+/// Place a project item on the timeline (drag from Project, or Insert/Overwrite from source).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_item(
+    s: &mut Session,
+    item: ItemId,
+    range: TimeRange,
+    at: Tick,
+    vdest: Option<TrackId>,
+    adest: Option<TrackId>,
+    insert: bool,
+    label: &str,
+    audio_split: Option<(TimeRange, Tick)>,
+) -> Result<Vec<ClipId>> {
+    if places_as_clips(s, item) {
+        return crate::sequence_tools::place_sequence_clips(s, item, range, at, vdest, adest, insert, label);
+    }
+    let plan = plan_item(s, item, vdest, adest, label)?;
     let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     let media = s.media.clone();
     let scaling = s.prefs.media.default_media_scaling.clone();
-    let is_media = matches!(pi.kind, ItemKind::Media(_) | ItemKind::Subclip { .. });
+    // media durations as before the edit (placing changes only the sequence): shared, not copied
+    let snapshot = s.project.clone();
     s.edit(label, |p, st| {
-        let seq = p.sequence(seq_id).ok_or(EngineError::NoSequence)?;
-        let rate = seq.settings.frame_rate;
-        let frame = (seq.settings.width, seq.settings.height);
-        let seq_par = seq.settings.par;
-        let mut placements = Vec::new();
-        let link = if has_v && has_a { Some(p.alloc_id()) } else { None };
-        if let Some(vdest) = vdest.filter(|_| has_v) {
-            let mut v = p.make_track_item(item, TrackKind::Video, at, range, rate).ok_or_else(|| bad(label, "bad item"))?;
-            v.link = link;
-            for e in &mut v.effects {
-                resolve_auto_points(e, frame, src_size);
-            }
-            // the picture's size at its display aspect, in sequence pixels
-            let shown = filmcraft_project::conformed_size(src_size, src_par.unwrap_or(seq_par), seq_par);
-            if is_media && shown != (f64::from(frame.0), f64::from(frame.1)) {
-                crate::settings::apply_media_scaling(&mut v, &scaling, frame, shown);
-            }
-            placements.push((vdest, v));
-        }
-        if let Some(adest) = adest.filter(|_| has_a) {
-            let (arange, aat) = audio_split.unwrap_or((range, at));
-            let mut a = p.make_track_item(item, TrackKind::Audio, aat, arange, rate).ok_or_else(|| bad(label, "bad item"))?;
-            // Modify ▸ Audio Channels with several audio clips: one per clip, on the tracks below
-            let clips: Vec<Vec<u16>> =
-                p.resolve_media(item).and_then(|(_, m, _)| m.interpret.audio_channels.as_ref()).map(|m| m.clips.clone()).unwrap_or_default();
-            let streams = p.resolve_media(item).map_or(1, |(_, m, _)| m.info.audio_streams.len());
-            let specs = audio_placement_specs(&clips, streams);
-            let first = p.sequence(seq_id).and_then(|q| q.audio_tracks.iter().position(|t| t.id == adest)).unwrap_or(0);
-            // too few audio tracks below the destination: grow the sequence from the destination track
-            let tracks = ensure_audio_tracks(p, seq_id, first, specs.len(), label)?;
-            a.link = if link.is_none() && specs.len() > 1 { Some(p.alloc_id()) } else { link };
-            for spec in specs {
-                let tid = match spec.track_offset {
-                    0 => &adest,
-                    off => match first.checked_add(off).and_then(|i| tracks.get(i)) {
-                        Some(t) => t,
-                        None => continue,
-                    },
-                };
-                let mut b = a.clone();
-                b.audio_stream = spec.audio_stream;
-                if spec.track_offset > 0 {
-                    b.id = ClipId(p.alloc_id());
-                }
-                if spec.audio_stream > 0 {
-                    b.source_channels.clear();
-                }
-                if let Some(chans) = spec.source_channels {
-                    b.source_channels = chans;
-                }
-                placements.push((*tid, b));
-            }
-        }
-        let snapshot = std::sync::Arc::new(p.clone());
-        let snap = snapshot.clone();
-        let durations = move |id: ItemId| crate::media_duration(&snapshot, &media, id);
-        let starts = move |id: ItemId| crate::media_start(&snap, id);
-        let min = rate.frame_duration();
-        let mut next = p.next_id;
-        let seq = p.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
-        let mut ctx = edit::EditCtx { next_id: &mut next, media_duration: &durations, media_start: &starts, min_duration: min };
-        let span = placements.iter().map(|x| x.1.start).min().zip(placements.iter().map(|x| x.1.end()).max());
-        let ids = if insert { edit::insert(seq, placements, &mut ctx)? } else { edit::overwrite(seq, placements, &mut ctx)? };
-        if insert
-            && st.ripple_sequence_markers
-            && let Some((a, b)) = span
-        {
-            crate::sequence_tools::ripple_markers(&mut seq.markers, a, b - a);
-        }
-        p.next_id = next;
+        let ids = apply_item(p, st, &plan, Placement { range, at, insert, label, audio_split, seq_id, media: &media, scaling: &scaling, snapshot: &snapshot })?;
         st.selection = ids.clone();
         Ok(ids)
+    })
+}
+
+/// Where and how [`apply_item`] places an item, and what it reads meanwhile.
+struct Placement<'a> {
+    range: TimeRange,
+    at: Tick,
+    insert: bool,
+    label: &'a str,
+    audio_split: Option<(TimeRange, Tick)>,
+    seq_id: ItemId,
+    media: &'a crate::media_pool::MediaPool,
+    scaling: &'a str,
+    /// The project before the edit, for media durations and starts.
+    snapshot: &'a Project,
+}
+
+/// The edit itself: the clips of `plan` made and edited into the sequence. Returns their ids.
+fn apply_item(p: &mut Project, st: &mut crate::EditorState, plan: &ItemPlan, how: Placement<'_>) -> Result<Vec<ClipId>> {
+    let ItemPlan { item, vdest, adest, has_v, has_a, src_size, src_par, is_media } = *plan;
+    let Placement { range, at, insert, label, audio_split, seq_id, media, scaling, snapshot } = how;
+    let seq = p.sequence(seq_id).ok_or(EngineError::NoSequence)?;
+    let rate = seq.settings.frame_rate;
+    let frame = (seq.settings.width, seq.settings.height);
+    let seq_par = seq.settings.par;
+    let mut placements = Vec::new();
+    let link = if has_v && has_a { Some(p.alloc_id()) } else { None };
+    if let Some(vdest) = vdest.filter(|_| has_v) {
+        let mut v = p.make_track_item(item, TrackKind::Video, at, range, rate).ok_or_else(|| bad(label, "bad item"))?;
+        v.link = link;
+        for e in &mut v.effects {
+            resolve_auto_points(e, frame, src_size);
+        }
+        // the picture's size at its display aspect, in sequence pixels
+        let shown = filmcraft_project::conformed_size(src_size, src_par.unwrap_or(seq_par), seq_par);
+        if is_media && shown != (f64::from(frame.0), f64::from(frame.1)) {
+            crate::settings::apply_media_scaling(&mut v, scaling, frame, shown);
+        }
+        placements.push((vdest, v));
+    }
+    if let Some(adest) = adest.filter(|_| has_a) {
+        let (arange, aat) = audio_split.unwrap_or((range, at));
+        let mut a = p.make_track_item(item, TrackKind::Audio, aat, arange, rate).ok_or_else(|| bad(label, "bad item"))?;
+        // Modify ▸ Audio Channels with several audio clips: one per clip, on the tracks below
+        let clips: Vec<Vec<u16>> = p.resolve_media(item).and_then(|(_, m, _)| m.interpret.audio_channels.as_ref()).map(|m| m.clips.clone()).unwrap_or_default();
+        let streams = p.resolve_media(item).map_or(1, |(_, m, _)| m.info.audio_streams.len());
+        let specs = audio_placement_specs(&clips, streams);
+        let first = p.sequence(seq_id).and_then(|q| q.audio_tracks.iter().position(|t| t.id == adest)).unwrap_or(0);
+        // too few audio tracks below the destination: grow the sequence from the destination track
+        let tracks = ensure_audio_tracks(p, seq_id, first, specs.len(), label)?;
+        a.link = if link.is_none() && specs.len() > 1 { Some(p.alloc_id()) } else { link };
+        for spec in specs {
+            let tid = match spec.track_offset {
+                0 => &adest,
+                off => match first.checked_add(off).and_then(|i| tracks.get(i)) {
+                    Some(t) => t,
+                    None => continue,
+                },
+            };
+            let mut b = a.clone();
+            b.audio_stream = spec.audio_stream;
+            if spec.track_offset > 0 {
+                b.id = ClipId(p.alloc_id());
+            }
+            if spec.audio_stream > 0 {
+                b.source_channels.clear();
+            }
+            if let Some(chans) = spec.source_channels {
+                b.source_channels = chans;
+            }
+            placements.push((*tid, b));
+        }
+    }
+    let durations = |id: ItemId| crate::media_duration(snapshot, media, id);
+    let starts = |id: ItemId| crate::media_start(snapshot, id);
+    let min = rate.frame_duration();
+    let mut next = p.next_id;
+    let seq = p.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
+    let mut ctx = edit::EditCtx { next_id: &mut next, media_duration: &durations, media_start: &starts, min_duration: min };
+    let span = placements.iter().map(|x| x.1.start).min().zip(placements.iter().map(|x| x.1.end()).max());
+    let ids = if insert { edit::insert(seq, placements, &mut ctx)? } else { edit::overwrite(seq, placements, &mut ctx)? };
+    if insert
+        && st.ripple_sequence_markers
+        && let Some((a, b)) = span
+    {
+        crate::sequence_tools::ripple_markers(&mut seq.markers, a, b - a);
+    }
+    p.next_id = next;
+    Ok(ids)
+}
+
+/// `timeline.place` with `items` in one edit: each item where the one before it ends.
+fn place_items_in_one_edit(s: &mut Session, p: &Value, ids: &[ItemId], at: Tick) -> Result<Value> {
+    let mut plans = Vec::with_capacity(ids.len());
+    for item in ids {
+        let mut one = p.clone();
+        if let Some(o) = one.as_object_mut() {
+            o.remove("items");
+            for k in ["time", "frame", "seconds"] {
+                o.remove(k);
+            }
+            o.insert("item".into(), json!(item.0));
+        }
+        let plan = plan_one(s, &one)?;
+        let placing = plan_item(s, plan.item, plan.v, plan.a, "timeline.place")?;
+        plans.push((plan, placing));
+    }
+    let rate = s.sequence_rate();
+    let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    let media = s.media.clone();
+    let scaling = s.prefs.media.default_media_scaling.clone();
+    let snapshot = s.project.clone();
+    s.edit("Place Clips", |p, st| {
+        let mut at = at;
+        let mut all = Vec::new();
+        let mut placed = Vec::with_capacity(plans.len());
+        for (one, plan) in &plans {
+            let (start, dur) = on_frame_grid(rate, at, one.dur);
+            let how = Placement {
+                range: TimeRange::new(one.sin, dur),
+                at: start,
+                insert: one.insert,
+                label: "Place Clips",
+                audio_split: None,
+                seq_id,
+                media: &media,
+                scaling: &scaling,
+                snapshot: &snapshot,
+            };
+            let clips = apply_item(p, st, plan, how)?;
+            if let Some(end) = p.sequence(seq_id).and_then(|q| clips.iter().filter_map(|c| q.find_item(*c).map(|(_, i)| i.end())).max()) {
+                at = end;
+            }
+            placed.push(json!(clips.iter().map(|c| c.0).collect::<Vec<_>>()));
+            all.extend(clips);
+        }
+        st.selection = all.clone();
+        Ok(json!({"clips": all.iter().map(|c| c.0).collect::<Vec<_>>(), "placed": placed}))
     })
 }
 

@@ -69,6 +69,21 @@ fn drop_on_row(h: &mut Harness<'static, FilmcraftApp>, row_control: &str, path: 
     step(h);
     h.input_mut().dropped_files.clear();
     step(h);
+    settle_imports(h);
+}
+
+/// Dropped files import in the background: step frames until the import has added them and the
+/// Timeline has had a frame to place them.
+fn settle_imports(h: &mut Harness<'static, FilmcraftApp>) {
+    for _ in 0..600 {
+        if h.state().session.background_imports.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        step(h);
+    }
+    step(h);
+    step(h);
 }
 
 /// (video clips, audio clips) on the active sequence.
@@ -159,6 +174,7 @@ fn drop_on_empty_timeline(h: &mut Harness<'static, FilmcraftApp>, path: &Path) {
     step(h);
     h.input_mut().dropped_files.clear();
     step(h);
+    settle_imports(h);
 }
 
 #[test]
@@ -169,6 +185,33 @@ fn still_dropped_on_empty_timeline_creates_a_sequence() {
     assert_eq!(h.state().session.project.items.len(), 2, "still plus the new sequence");
     assert!(h.state().session.active_sequence().is_some(), "status: {}", h.state().ui.status);
     assert_eq!(clip_counts(&h), (1, 0), "status: {}", h.state().ui.status);
+}
+
+/// A field report: 353 files dropped together were imported on the UI thread (the window froze
+/// for 4.8 s) and placed with a command each. Now the files import in the background, the window
+/// keeps drawing, and when they are in one command makes the sequence: one Undo takes it back.
+#[test]
+fn several_files_dropped_on_empty_timeline_import_meanwhile_and_make_one_sequence() {
+    let mut h = empty_harness();
+    let files = [still("drop_many_a.png"), still("drop_many_b.png"), tone("drop_many_c.wav")];
+    let panel = control_rect(&h, "panel.Timeline");
+    pointer_to(&mut h, panel.center());
+    for f in &files {
+        h.input_mut().dropped_files.push(std::sync::Arc::new(OsFile(f.clone())));
+    }
+    step(&mut h);
+    h.input_mut().dropped_files.clear();
+    assert!(h.state().session.history.undo.is_empty() || h.state().session.active_sequence().is_none(), "nothing placed during the drop frame");
+    settle_imports(&mut h);
+    let q = h.state().session.active_sequence().expect("a sequence from the dropped files");
+    let clips: usize = q.video_tracks.iter().chain(&q.audio_tracks).map(|t| t.items.len()).sum();
+    assert!(clips >= files.len(), "every file is on the timeline: {clips} clips, status {}", h.state().ui.status);
+    let undo = h.state().session.history.undo.len();
+    let last = h.state().session.history.undo.last().map(|u| u.0.clone());
+    assert_eq!(last.as_deref(), Some("New Sequence"), "one step for the sequence and its clips");
+    h.state_mut().session.undo();
+    assert!(h.state().session.active_sequence().is_none_or(|q| q.video_tracks.iter().chain(&q.audio_tracks).all(|t| t.items.is_empty())));
+    assert_eq!(h.state().session.history.undo.len(), undo - 1);
 }
 
 #[test]
@@ -212,6 +255,7 @@ fn several_files_dropped_together_are_placed_in_one_undo_step() {
     step(&mut h);
     h.input_mut().dropped_files.clear();
     step(&mut h);
+    settle_imports(&mut h);
     assert_eq!(clip_counts(&h), (3, 0), "status: {}", h.state().ui.status);
     let spans: Vec<(i64, i64)> = {
         let q = h.state().session.active_sequence().unwrap();
@@ -238,6 +282,7 @@ fn drop_at(h: &mut Harness<'static, FilmcraftApp>, pos: egui::Pos2, path: &Path)
     step(h);
     h.input_mut().dropped_files.clear();
     step(h);
+    settle_imports(h);
 }
 
 fn hover_at(h: &mut Harness<'static, FilmcraftApp>, pos: egui::Pos2) -> bool {
@@ -329,11 +374,13 @@ fn os_cursor_hook_selects_destination_when_egui_pointer_has_no_motion() {
     step(&mut h);
     h.input_mut().dropped_files.clear();
     step(&mut h);
+    settle_imports(&mut h);
     assert_eq!(clip_counts(&h), (0, 0));
     h.state_mut().ui.floating.clear();
     h.input_mut().dropped_files.push(std::sync::Arc::new(OsFile(still("drop_os_hook_visible.png"))));
     step(&mut h);
     h.input_mut().dropped_files.clear();
     step(&mut h);
+    settle_imports(&mut h);
     assert_eq!(clip_counts(&h), (1, 0));
 }

@@ -763,18 +763,10 @@ fn empty_state(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         && let Some((first, rest)) = items.split_first()
     {
         app.pending_timeline_drop = None;
-        if let Err(e) = app.session.execute("file.newSequence", json!({"fromItem": first.0})) {
+        // one command, one undo step: the first sets the sequence, the rest follow it back to back
+        let ids: Vec<u64> = std::iter::once(first).chain(rest).map(|i| i.0).collect();
+        if let Err(e) = app.session.execute("file.newSequence", json!({"fromItems": ids})) {
             app.ui.status = e.to_string();
-        } else {
-            let mut t = app.session.project.item(*first).map(|i| i.duration()).unwrap_or(Tick::ZERO);
-            for item in rest {
-                let params = json!({"item": item.0, "time": t.0, "insert": false});
-                if let Err(e) = app.session.execute("timeline.place", params) {
-                    app.ui.status = e.to_string();
-                } else {
-                    t = Tick(t.0.saturating_add(app.session.project.item(*item).map(|i| i.duration().0.max(0)).unwrap_or(0)));
-                }
-            }
         }
     }
 }

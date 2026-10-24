@@ -401,6 +401,12 @@ pub enum Event {
     OpenSource(ItemId),
     /// Show this item in the Project panel (Reveal in Project).
     RevealInProject(ItemId),
+    /// A background import (`file.import {async: true}`, its `importJob`) has added its files:
+    /// the items it made, in the order of its paths (the ones that failed are left out).
+    ImportFinished {
+        job: u64,
+        items: Vec<ItemId>,
+    },
 }
 
 pub struct Session {
@@ -987,8 +993,10 @@ impl Session {
     ) -> Result<R> {
         let seq_id = self.state.active_sequence.ok_or(EngineError::NoSequence)?;
         let media = self.media.clone();
+        // Media durations and starts as they were before the edit: the project as it stands, shared,
+        // not a deep copy per edit (a drop of 353 clips copied the whole project 353 more times).
+        let project_snapshot = self.project.clone();
         let body = move |p: &mut Project, st: &mut EditorState| {
-            let project_snapshot = std::sync::Arc::new(p.clone());
             let snap = project_snapshot.clone();
             let durations = move |id: ItemId| -> Option<Tick> { media_duration(&project_snapshot, &media, id) };
             let starts = move |id: ItemId| media_start(&snap, id);
