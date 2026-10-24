@@ -281,6 +281,9 @@ struct Health {
     /// A failure the audio callback noticed and left for [`Health::log_pending`] to log: the
     /// callback must not wait on the logger's stderr and file writes. One of the `FAILED_*` codes.
     pending: std::sync::atomic::AtomicU8,
+    /// The first stream error, left for [`Health::log_pending`] like `pending` (cpal calls the error
+    /// callback on the stream's worker, which the logger must not hold up).
+    stream_error: Mutex<Option<String>>,
 }
 
 const FAILED_BUFFER: u8 = 1;
@@ -293,6 +296,10 @@ impl Health {
             FAILED_BUFFER => log::error!("unable to allocate the audio conversion buffer"),
             FAILED_MIXER => log::error!("the audio mixer failed; playing without sound"),
             _ => {}
+        }
+        // the logger writes stderr without panicking when its reader is gone (`eprintln!` would)
+        if let Some(e) = self.stream_error.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            log::warn!("audio stream error: {e}");
         }
     }
 }
@@ -386,8 +393,15 @@ fn stream_error(health: &Health, e: cpal::StreamError) {
         cpal::StreamError::BackendSpecific { .. } => health.errored.store(true, Ordering::SeqCst),
     }
     if !health.reported.swap(true, Ordering::SeqCst) {
-        // the logger writes stderr without panicking when its reader is gone (`eprintln!` would)
-        log::warn!("audio stream error: {e}");
+        // never wait here: a slot the UI thread is reading loses this message, not the stream
+        let slot = match health.stream_error.try_lock() {
+            Ok(slot) => Some(slot),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut slot) = slot {
+            *slot = Some(e.to_string());
+        }
     }
 }
 
@@ -515,9 +529,17 @@ mod tests {
         assert!(health.errored.load(Ordering::SeqCst) && !health.lost.load(Ordering::SeqCst));
         stream_error(&health, cpal::StreamError::DeviceNotAvailable);
         assert!(health.lost.load(Ordering::SeqCst));
+        // the first error is left for the UI thread to log, once
+        assert!(lock_slot(&health).as_deref().is_some_and(|e| e.contains("POLLERR")));
+        health.log_pending();
+        assert!(lock_slot(&health).is_none());
         assert!(!health.failed.load(Ordering::SeqCst), "a stream error alone must not silence playback");
         let output = CpalOut::new();
         assert_eq!(output.played_frames(), None, "no stream, no clock");
+    }
+
+    fn lock_slot(health: &Health) -> std::sync::MutexGuard<'_, Option<String>> {
+        health.stream_error.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn ms(n: u64) -> Duration {
