@@ -113,6 +113,9 @@ fn page_bar_pages_menu_deliver_and_restart() {
     let r = d.menu("window.workspaceSet.evolve", json!({}));
     assert_eq!((r["workspaceSet"].as_str(), r["workspace"].as_str()), (Some("evolve"), Some("Edit")));
     assert_eq!(d.app().workspaces.set, WorkspaceSet::Evolve);
+    // the set and its page are saved together
+    let file: Value = serde_json::from_slice(&std::fs::read(data.join("workspaces.json")).unwrap()).unwrap();
+    assert_eq!((file["set"].as_str(), file["current"].as_str()), (Some("evolve"), Some("Edit")));
     let ids = d.elements("pages.");
     for page in EVOLVE_PAGES {
         assert!(ids.contains(&format!("pages.{}", page.to_ascii_lowercase())), "{ids:?}");

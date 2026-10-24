@@ -66,6 +66,16 @@ pub const BUILTIN_PRESETS: [&str; 5] = [DEFAULT_PRESET, PREMIERE_PRESET, FCP_PRE
 /// Appended to the name of a custom preset file saved under a name that has since become a
 /// built-in preset (a custom "Evolve" is listed and loaded as "Evolve (custom)"; its file is kept).
 const CUSTOM_SUFFIX: &str = " (custom)";
+/// How many such files of one built-in name get a listed name ("Evolve (custom 2)"…).
+const MAX_ALIASES: usize = 100;
+
+/// A custom preset file and the name it is listed under ([`Shortcuts::user_presets`]).
+struct CustomPreset {
+    listed: String,
+    /// The name inside the file.
+    stored: String,
+    path: PathBuf,
+}
 
 const FILE_FORMAT: &str = "filmcraft-keyboard-shortcuts";
 const DIR_NAME: &str = "Keyboard Shortcuts";
@@ -657,36 +667,56 @@ impl Shortcuts {
 
     /// Custom preset names (files in the presets directory).
     pub fn user_presets(&self) -> Vec<String> {
-        let Some(dir) = self.presets_dir() else { return Vec::new() };
-        let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
-        let mut v: Vec<String> = rd
-            .flatten()
-            .filter(|e| e.file_name() != ACTIVE_FILE)
-            .filter_map(|e| std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<PresetFile>(&b).ok()).map(|p| custom_name(&p.name)))
-            .collect();
+        let mut v: Vec<String> = self.custom_presets().into_iter().map(|c| c.listed).collect();
         v.sort();
-        v.dedup();
         v
     }
 
-    /// The file of custom preset `name` (one listed as "<built-in name> (custom)" is the file saved
-    /// under the built-in name).
+    /// The custom preset files, each under the name it is listed, loaded and deleted by. A file saved
+    /// under a name that has since become a built-in preset (a custom "Evolve") is listed as
+    /// "Evolve (custom)", or "Evolve (custom 2)"… when a preset of that name exists, so every listed
+    /// name is exactly one file. Files are not renamed or rewritten.
+    fn custom_presets(&self) -> Vec<CustomPreset> {
+        let Some(dir) = self.presets_dir() else { return Vec::new() };
+        let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+        let mut files: Vec<(String, PathBuf)> = rd
+            .flatten()
+            .filter(|e| e.file_name() != ACTIVE_FILE)
+            .filter_map(|e| {
+                let path = e.path();
+                let f = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<PresetFile>(&b).ok())?;
+                Some((f.name, path))
+            })
+            .collect();
+        files.sort();
+        files.dedup_by(|a, b| a.0 == b.0);
+        let (aliased, own): (Vec<_>, Vec<_>) = files.into_iter().partition(|(stored, _)| BUILTIN_PRESETS.contains(&stored.as_str()));
+        let mut out: Vec<CustomPreset> = own.into_iter().map(|(stored, path)| CustomPreset { listed: stored.clone(), stored, path }).collect();
+        for (stored, path) in aliased {
+            let free = (1..=MAX_ALIASES)
+                .map(|i| if i == 1 { format!("{stored}{CUSTOM_SUFFIX}") } else { format!("{stored} (custom {i})") })
+                .find(|n| !out.iter().any(|c| c.listed == *n));
+            if let Some(listed) = free {
+                out.push(CustomPreset { listed, stored, path });
+            }
+        }
+        out
+    }
+
+    /// The file of custom preset `name`.
     fn custom_path(&self, name: &str) -> Option<PathBuf> {
-        let stored = name.strip_suffix(CUSTOM_SUFFIX).filter(|n| BUILTIN_PRESETS.contains(n)).unwrap_or(name);
-        self.preset_path(stored)
+        self.custom_presets().into_iter().find(|c| c.listed == name).map(|c| c.path).or_else(|| self.preset_path(name))
     }
 
     /// The preset `active.json` names: a set saved as a custom preset whose name has since become a
     /// built-in one (its file still holds the same bindings) is that custom preset, not the built-in.
     fn active_name(&self, f: &PresetFile) -> String {
-        if !f.modified
-            && BUILTIN_PRESETS.contains(&f.name.as_str())
-            && let Some(path) = self.preset_path(&f.name)
-            && let Ok(custom) = read_file(&path)
-            && custom.name == f.name
-            && convert(custom.bindings, custom.platform) == convert(f.bindings.clone(), f.platform)
-        {
-            return custom_name(&f.name);
+        if !f.modified && BUILTIN_PRESETS.contains(&f.name.as_str()) {
+            let bindings = convert(f.bindings.clone(), f.platform);
+            let same = |c: &CustomPreset| read_file(&c.path).is_ok_and(|custom| convert(custom.bindings, custom.platform) == bindings);
+            if let Some(c) = self.custom_presets().into_iter().find(|c| c.stored == f.name && same(c)) {
+                return c.listed;
+            }
         }
         f.name.clone()
     }
@@ -894,8 +924,12 @@ impl Shortcuts {
         if name.is_empty() {
             return Err("a preset needs a name".into());
         }
-        if BUILTIN_PRESETS.iter().any(|b| b.eq_ignore_ascii_case(name) || custom_name(b).eq_ignore_ascii_case(name)) {
+        if BUILTIN_PRESETS.iter().any(|b| b.eq_ignore_ascii_case(name)) {
             return Err(format!("`{name}` is a built-in preset; choose another name"));
+        }
+        // the listed name of an older custom preset saved under a built-in name
+        if self.custom_presets().iter().any(|c| c.listed != c.stored && c.listed.eq_ignore_ascii_case(name)) {
+            return Err(format!("`{name}` is the name of an existing custom preset; choose another name"));
         }
         let path = self.preset_path(name).ok_or("no data directory for custom presets")?;
         write_file(&path, &self.file(name, false))?;
@@ -1086,11 +1120,6 @@ fn check_panel(panel: Option<&str>) -> std::result::Result<Option<&'static str>,
                 .ok_or_else(|| format!("unknown panel `{p}` (one of {})", PANELS.join(", ")))
         }
     }
-}
-
-/// The name a custom preset file saved as `stored` is listed under.
-fn custom_name(stored: &str) -> String {
-    if BUILTIN_PRESETS.contains(&stored) { format!("{stored}{CUSTOM_SUFFIX}") } else { stored.to_string() }
 }
 
 /// Normalise bindings read from a file written for `platform`.

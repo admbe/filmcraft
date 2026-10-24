@@ -339,6 +339,47 @@ fn custom_preset_saved_under_a_new_builtin_name_stays_reachable() {
 }
 
 #[test]
+fn a_custom_preset_named_like_the_alias_keeps_its_own_file() {
+    // a preset saved as "Evolve (custom)", and an older custom preset saved as "Evolve"
+    let dir = temp_dir("custom-evolve-alias");
+    let keys = dir.join("Keyboard Shortcuts");
+    let mut s = Session::default();
+    s.shortcuts.set_dir(&dir);
+    s.execute("shortcuts.set", json!({"command": "sequence.addEdit", "keys": "Cmd+Shift+Y"})).unwrap();
+    s.execute("shortcuts.savePreset", json!({"name": "Evolve (custom)"})).unwrap();
+    s.execute("shortcuts.set", json!({"command": "sequence.addEdit", "keys": "Cmd+Shift+B"})).unwrap();
+    s.execute("shortcuts.savePreset", json!({"name": "Old Evolve"})).unwrap();
+    let path = keys.join("Old Evolve.json");
+    let mut f: crate::shortcuts::PresetFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    f.name = "Evolve".into();
+    std::fs::write(keys.join("Evolve.json"), serde_json::to_vec(&f).unwrap()).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    // each name is its own file: the literal one keeps its name, the older one is listed next to it
+    let mut t = Session::default();
+    t.shortcuts.set_dir(&dir);
+    assert_eq!(t.execute("shortcuts.presets", json!({})).unwrap()["custom"], json!(["Evolve (custom 2)", "Evolve (custom)"]));
+    t.execute("shortcuts.loadPreset", json!({"name": "Evolve (custom)"})).unwrap();
+    assert_eq!(t.shortcuts.primary("sequence.addEdit").as_deref(), Some("Cmd+Shift+Y"));
+    t.execute("shortcuts.loadPreset", json!({"name": "Evolve (custom 2)"})).unwrap();
+    assert_eq!(t.shortcuts.primary("sequence.addEdit").as_deref(), Some("Cmd+Shift+B"));
+    // the alias is reserved; the literal preset can still be saved over
+    assert!(t.execute("shortcuts.savePreset", json!({"name": "Evolve (custom 2)"})).is_err());
+    t.execute("shortcuts.loadPreset", json!({"name": "Evolve (custom)"})).unwrap();
+    t.execute("shortcuts.savePreset", json!({"name": "Evolve (custom)"})).unwrap();
+    // deleting the literal preset removes its file only, and the older one is listed under the alias again
+    t.execute("shortcuts.deletePreset", json!({"name": "Evolve (custom)"})).unwrap();
+    assert!(!keys.join("Evolve (custom).json").exists());
+    assert!(keys.join("Evolve.json").exists());
+    assert_eq!(t.execute("shortcuts.presets", json!({})).unwrap()["custom"], json!(["Evolve (custom)"]));
+    t.execute("shortcuts.loadPreset", json!({"name": "Evolve (custom)"})).unwrap();
+    assert_eq!(t.shortcuts.primary("sequence.addEdit").as_deref(), Some("Cmd+Shift+B"));
+    // and deleting the alias removes the older file
+    t.execute("shortcuts.deletePreset", json!({"name": "Evolve (custom)"})).unwrap();
+    assert!(!keys.join("Evolve.json").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn list_searches_labels_and_keys() {
     let s = Session::default();
     let r = s.shortcuts.commands();

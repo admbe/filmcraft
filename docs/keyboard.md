@@ -54,7 +54,8 @@ other presets it starts from FilmCraft Default and gives each listed command exa
 keys, taking a key away from whatever else had it (so Find loses ⌘F to the full-screen viewer,
 and the Track Select tools lose A / ⇧A to the Selection tool and Mark Selection).
 A custom preset saved as "Evolve" before this preset existed is kept: its file is untouched and
-it is listed, loaded and restored at launch as **Evolve (custom)**.
+it is listed, loaded and restored at launch as **Evolve (custom)** (**Evolve (custom 2)** when a preset
+of that name exists, so every listed name is one file).
 
 | Group | Key → FilmCraft command |
 |---|---|

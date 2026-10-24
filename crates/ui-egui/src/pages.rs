@@ -43,7 +43,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             painter.rect_filled(r, t.radius_sm, t.hover);
         }
         let color = if active {
-            t.accent
+            t.accent_text()
         } else if resp.hovered() {
             t.text
         } else {

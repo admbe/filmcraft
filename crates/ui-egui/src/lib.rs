@@ -870,8 +870,11 @@ impl FilmcraftApp {
         if self.workspaces.set != set {
             let mut next = self.workspaces.clone();
             next.set = set;
+            // the set and the page shown in it are saved together, once (`set_workspace` then
+            // finds `current` already set and saves nothing)
+            let name = dock::find(&next, &self.ui.workspace).unwrap_or_else(|| set.default_workspace().to_string());
+            next.current = name.clone();
             let saved = self.set_workspaces(next);
-            let name = dock::find(&self.workspaces, &self.ui.workspace).unwrap_or_else(|| set.default_workspace().to_string());
             self.set_workspace(&name);
             if let Err(e) = saved {
                 self.ui.status = e.clone();
