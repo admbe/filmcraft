@@ -169,6 +169,9 @@
 	Hide All Caption Tracks	Ocultar todas las pistas de subtítulos
 	High Quality Playback	Reproducción de alta calidad
 	History	Historial
+	Delete Redoable Actions	Eliminar acciones que se pueden rehacer
+	Clear History	Borrar historial
+	Delete the dimmed actions after the current state? They cannot be redone.	¿Eliminar las acciones atenuadas posteriores al estado actual? No se podrán rehacer.
 	Import From	Importar desde
 	Import Image Sequence…	Importar secuencia de imágenes…
 	Import from Media Browser	Importar desde el navegador de medios
@@ -508,6 +511,10 @@
 	Reveal Sequence in Project	Mostrar secuencia en el proyecto
 	Video Thumbnails	Miniaturas de video
 	Audio Waveforms	Formas de onda de audio
+	Work Area Bar	Barra de área de trabajo
+	Start: {tc}	Inicio: {tc}
+	End: {tc}	Fin: {tc}
+	Duration: {tc}	Duración: {tc}
 	Delete Preset	Eliminar ajuste preestablecido
 	Export Preset…	Exportar ajuste preestablecido…
 	Import Presets…	Importar ajustes preestablecidos…
