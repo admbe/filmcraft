@@ -131,8 +131,10 @@ fn auto(s: &mut Session, p: &Value) -> Result<Value> {
     let clips = targets(s, p)?;
     let mut done = Vec::new();
     let mut errors = Vec::new();
+    // media whose RAW development this batch already set: clips sharing it go to Lumetri
+    let mut developed: Vec<ItemId> = Vec::new();
     for clip in clips {
-        match correct_clip(s, clip, cfg) {
+        match correct_clip(s, clip, cfg, &mut developed) {
             Ok(v) => done.push(v),
             Err(e) => errors.push(json!({"clip": clip.0, "error": e.to_string()})),
         }
@@ -160,7 +162,7 @@ fn sample_times(start: Tick, end: Tick, playhead: Tick, samples: Option<u64>) ->
         .collect()
 }
 
-fn correct_clip(s: &mut Session, clip: ClipId, cfg: Config) -> Result<Value> {
+fn correct_clip(s: &mut Session, clip: ClipId, cfg: Config, developed: &mut Vec<ItemId>) -> Result<Value> {
     let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
     let (tid, it) = q.find_item(clip).ok_or_else(|| bad(CMD, format!("no clip {} in the active sequence", clip.0)))?;
@@ -207,9 +209,19 @@ fn correct_clip(s: &mut Session, clip: ClipId, cfg: Config) -> Result<Value> {
     }
     let n0 = s.history.undo.len();
     let mut into = cfg.into;
+    let root = s.project.resolve_media(item).map(|(r, _, _)| r);
+    if into == Into::Raw && root.is_some_and(|r| developed.contains(&r)) {
+        // the development is the media's, not the clip's: a second write would undo the first
+        // clip's correction while it still reports it applied
+        out["note"] = json!("an earlier clip of this batch set this media's RAW development; Lumetri Basic Correction was set instead");
+        into = Into::Lumetri;
+    }
     if into == Into::Raw {
         match raw_develop(s, item, &a, cfg.options) {
-            Ok(Some(set)) => out["set"] = set,
+            Ok(Some(set)) => {
+                out["set"] = set;
+                developed.extend(root);
+            }
             Ok(None) => {
                 out["note"] = json!("this clip has no RAW development controls in this build; Lumetri Basic Correction was set instead");
                 into = Into::Lumetri;

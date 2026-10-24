@@ -73,6 +73,8 @@ exposure (media whose decoder offers development controls): the command asks
 (from the measured red/blue cast with a mired model around the current setting, 124 mired per stop of
 cast), `tint` (Lumetri units) and `exposure` (stops) through it. Media without RAW development controls,
 and builds whose `clip.sourceSettings` does not develop yet, fall back to Lumetri and say so in `note`.
+The development belongs to the media, so when several clips of one batch use the same media, the first
+develops it and the others get Lumetri (with a `note`), each keeping its own correction.
 
 Every clip is **one undo step** ("Auto Correct"), the added effect included. Hostile parameters are
 bounded (`samples` to 1…16, the targets to sane ranges, slider values to their ranges); frames with no
@@ -158,7 +160,10 @@ seq = run(call, "file.newSequence", name="Auto", fromItems=items)["sequence"]
 measured = run(call, "lumetri.auto", items=items, frames="sampled", apply=False)
 good = [m["clip"] for m in measured["items"] if m["confidence"] >= 0.4]
 if good:
-    print(run(call, "lumetri.auto", clips=good, frames="sampled", into="lumetri"))
+    result = run(call, "lumetri.auto", clips=good, frames="sampled", into="lumetri")
+    print(result)
+    if result["errors"]:  # a clip left uncorrected: don't export
+        sys.exit(f"not corrected: {result['errors']}")
 job = run(call, "file.exportMedia", path=out, preset=preset, sequence=seq, wait=False)["job"]
 while any(j["id"] == job and not j.get("finished") for j in run(call, "jobs.list")):
     time.sleep(2)
