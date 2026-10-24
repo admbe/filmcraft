@@ -370,6 +370,10 @@ fn color_info(s: &mut Session, p: &Value) -> Result<Value> {
         // mastering display / content light level and the peak tone mapping uses
         "hdrMetadata": m.info.video.as_ref().and_then(|v| v.hdr),
         "toneMapPeakNits": m.info.video.as_ref().and_then(|v| v.hdr.and_then(|h| h.peak_nits())),
+        // the Interpret Footage dialog's other section: the pixel aspect ratio in use and the override
+        "pixelAspect": m.pixel_aspect(),
+        "pixelAspectOverride": m.interpret.par.and_then(filmcraft_project::checked_par),
+        "pixelAspectLabel": filmcraft_project::pixel_aspect_label(m.pixel_aspect()),
     }))
 }
 

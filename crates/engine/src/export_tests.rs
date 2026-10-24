@@ -862,3 +862,43 @@ fn caption_sidecars_keep_only_the_exported_interval() {
         assert!(doc.cues.is_empty(), "half-open export excludes cues touching either boundary: {doc:?}");
     }
 }
+
+/// A sequence with non-square pixels (Sequence From Clip of a 1.33x anamorphic clip: 4:3 pixels)
+/// exports its pixels as they are at Match Source, with the ratio in the file (SPS VUI and `pasp`
+/// in MP4, `pasp` in QuickTime), so players desqueeze it; ffprobe is the oracle. An explicit
+/// square-pixel export of the same sequence letterboxes the desqueezed picture instead.
+#[test]
+fn anamorphic_sequences_export_with_their_pixel_aspect() {
+    let mut s = Session::default();
+    let r = s.execute("file.newColorMatte", json!({"color": "#ff0000", "width": 144, "height": 108, "seconds": 1.0})).unwrap();
+    let item = filmcraft_project::ItemId(r["item"].as_u64().unwrap());
+    s.execute("clip.interpretFootage", json!({"items": [item.0], "pixelAspect": [4, 3]})).unwrap();
+    s.execute("file.newSequenceFromClip", json!({"items": [item.0]})).unwrap();
+    assert_eq!(s.active_sequence().unwrap().settings.par, (4, 3));
+    let dir = Scratch::new("anamorphic");
+    let range = json!({"range": "custom", "startSeconds": 0.0, "endSeconds": 0.25, "audio": false, "wait": true});
+    for (name, format) in [("squeeze.mp4", "h264"), ("squeeze.mov", "prores")] {
+        let mut p = range.clone();
+        p["path"] = json!(dir.path(name));
+        p["format"] = json!(format);
+        let path = s.execute("file.exportMedia", p).unwrap()["path"].as_str().unwrap().to_string();
+        let Some(j) = probe(&path) else { return };
+        let v = stream(&j, "video").unwrap();
+        assert_eq!((num(&v["width"]), num(&v["height"])), (144.0, 108.0), "{name}: the sequence's pixels: {v}");
+        assert_eq!((v["sample_aspect_ratio"].as_str(), v["display_aspect_ratio"].as_str()), (Some("4:3"), Some("16:9")), "{name}: {v}");
+    }
+    // square pixels asked for: the 192-wide display picture is fit into the 144 x 108 frame, letterboxed
+    let mut p = range.clone();
+    p["path"] = json!(dir.path("square.mp4"));
+    p["format"] = json!("h264");
+    p["settings"] = json!({"pixelAspect": [1, 1]});
+    let path = s.execute("file.exportMedia", p).unwrap()["path"].as_str().unwrap().to_string();
+    let Some(j) = probe(&path) else { return };
+    let v = stream(&j, "video").unwrap();
+    assert!(matches!(v["sample_aspect_ratio"].as_str(), None | Some("1:1") | Some("0:1")), "{v}");
+    let src = s.media.open_file(&path, &crate::FsServices).unwrap();
+    let frame = src.video_frame(filmcraft_media::FrameRequest::full(filmcraft_time::Tick::ZERO)).unwrap().to_rgba8();
+    let (w, h) = (144usize, 108usize);
+    let red = |x: usize, y: usize| frame[(y * w + x) * 4] > 128 && frame[(y * w + x) * 4 + 1] < 100;
+    assert!(red(w / 2, h / 2) && !red(w / 2, 2) && !red(w / 2, h - 3), "letterboxed: red in the middle, black bars top and bottom");
+}

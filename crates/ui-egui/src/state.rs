@@ -793,11 +793,21 @@ impl Default for ProjectManagerDraft {
     }
 }
 
+fn pixel_aspect_from_file() -> String {
+    "file".into()
+}
+
 /// Colour dialogs: drafts are applied with one engine command on OK.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ColorDialog {
-    /// `clip.interpretFootage`: the media items and the chosen colour space id ("auto" = metadata).
-    Interpret { items: Vec<u64>, color_space: String },
+    /// `clip.interpretFootage`: the media items, the chosen colour space id ("auto" = metadata) and
+    /// the pixel aspect ratio to conform to ("file" = the file's, else "num:den").
+    Interpret {
+        items: Vec<u64>,
+        color_space: String,
+        #[serde(default = "pixel_aspect_from_file")]
+        pixel_aspect: String,
+    },
     /// `sequence.colorSettings`.
     Sequence { working_space: String, wide_gamut: bool, auto_tone_map: bool },
 }

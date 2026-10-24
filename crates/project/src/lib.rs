@@ -923,6 +923,30 @@ pub fn checked_par(par: (u32, u32)) -> Option<(u32, u32)> {
     Some((n / g, d / g))
 }
 
+/// The pixel aspect ratios Interpret Footage and the sequence presets offer by name (`(label,
+/// ratio)`): square pixels, the standard-definition DV / D1 ratios, and the anamorphic squeezes
+/// (a 1.33x anamorphic lens on a 16:9 sensor gives 4:3 pixels, 1.5x gives 3:2, 2x gives 2:1).
+/// Every ratio is exact in lowest terms; the label shows it rounded.
+pub const STANDARD_PIXEL_ASPECTS: [(&str, (u32, u32)); 8] = [
+    ("Square Pixels (1.0)", (1, 1)),
+    ("D1/DV NTSC (0.9091)", (10, 11)),
+    ("D1/DV NTSC Widescreen 16:9 (1.2121)", (40, 33)),
+    ("D1/DV PAL (1.0940)", (59, 54)),
+    ("D1/DV PAL Widescreen 16:9 (1.4587)", (118, 81)),
+    ("Anamorphic 1.33x / HD Anamorphic 1080 (1.3333)", (4, 3)),
+    ("Anamorphic 1.5x / DVCPRO HD (1.5)", (3, 2)),
+    ("Anamorphic 2x (2.0)", (2, 1)),
+];
+
+/// The name of a pixel aspect ratio: its [`STANDARD_PIXEL_ASPECTS`] label, else "Custom (ratio)".
+pub fn pixel_aspect_label(par: (u32, u32)) -> String {
+    let par = sane_par(par);
+    match STANDARD_PIXEL_ASPECTS.iter().find(|(_, p)| *p == par) {
+        Some((label, _)) => (*label).to_string(),
+        None => format!("Custom ({:.4})", par_ratio(par)),
+    }
+}
+
 /// [`checked_par`], with square pixels for a ratio that is unset or makes no sense.
 pub fn sane_par(par: (u32, u32)) -> (u32, u32) {
     checked_par(par).unwrap_or((1, 1))
@@ -2233,6 +2257,14 @@ mod tests {
             assert_eq!(par_ratio(bad), 1.0, "{bad:?}");
         }
         assert!((par_ratio((4, 3)) - 4.0 / 3.0).abs() < 1e-12);
+        // the named ratios are exact, in lowest terms and labelled by name; the rest by value
+        for (label, par) in STANDARD_PIXEL_ASPECTS {
+            assert_eq!(checked_par(par), Some(par), "{label}");
+            assert_eq!(pixel_aspect_label(par), label);
+        }
+        assert_eq!(pixel_aspect_label((8, 6)), "Anamorphic 1.33x / HD Anamorphic 1080 (1.3333)");
+        assert_eq!(pixel_aspect_label((16, 9)), "Custom (1.7778)");
+        assert_eq!(pixel_aspect_label((0, 0)), "Square Pixels (1.0)");
         // 1440 x 1080 with 4:3 pixels is 1920 x 1080 square pixels, and itself in a 4:3 frame
         assert_eq!(conformed_size((1440, 1080), (4, 3), (1, 1)), (1920.0, 1080.0));
         assert_eq!(conformed_size((1440, 1080), (4, 3), (8, 6)), (1440.0, 1080.0));

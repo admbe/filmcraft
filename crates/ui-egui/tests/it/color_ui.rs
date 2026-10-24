@@ -179,10 +179,22 @@ fn interpret_footage_and_sequence_color_dialogs_and_hdr_scopes() {
     assert_eq!(r["dialog"], "interpretFootage");
     d.frames(3);
     d.click("colorDialog.space.slog3-sgamut3cine");
+    // the Pixel Aspect Ratio section offers the anamorphic squeezes: 4:3 pixels for a 1.33x lens
+    assert!(d.ids("colorDialog.par.").iter().any(|i| i == "colorDialog.par.4x3"), "{:?}", d.ids("colorDialog.par."));
+    d.click("colorDialog.par.4x3");
     d.snapshot("color-interpret-footage", None);
     d.click("colorDialog.ok");
     let info = d.exec("media.colorInfo", json!({"item": item}));
     assert_eq!(info["override"], "slog3-sgamut3cine", "{info}");
+    assert_eq!(info["pixelAspectOverride"], json!([4, 3]), "one OK applies both sections: {info}");
+    // reopened, the dialog shows the override; "from file" goes back to the file's square pixels
+    d.ok("ui.menu.invoke", json!({"id": "clip.interpretFootage"}));
+    d.frames(3);
+    d.click("colorDialog.par.file");
+    d.click("colorDialog.ok");
+    let info = d.exec("media.colorInfo", json!({"item": item}));
+    assert_eq!((info["pixelAspectOverride"].clone(), info["pixelAspect"].clone()), (Value::Null, json!([1, 1])), "{info}");
+    d.exec("edit.undo", json!({}));
     // Sequence ▸ Color Management…: Rec. 2100 PQ
     let r = d.ok("ui.menu.invoke", json!({"id": "sequence.colorSettings"}));
     assert_eq!(r["dialog"], "sequenceColor");

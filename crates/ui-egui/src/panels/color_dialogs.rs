@@ -1,8 +1,11 @@
-//! Colour dialogs: Clip ▸ Modify ▸ Interpret Footage… (Color Management) and Sequence ▸ Color
-//! Management… (working space, wide gamut, Auto Tone Map Media). Each applies one engine command
-//! on OK, so it is a single undo step. Automation ids: `colorDialog.space.<id>`,
+//! Colour dialogs: Clip ▸ Modify ▸ Interpret Footage… (Pixel Aspect Ratio and Color Management)
+//! and Sequence ▸ Color Management… (working space, wide gamut, Auto Tone Map Media). Each applies
+//! one engine command on OK, so it is a single undo step. Automation ids: `colorDialog.space.<id>`,
+//! `colorDialog.par.file`, `colorDialog.par.<num>x<den>` (the [`STANDARD_PIXEL_ASPECTS`]),
 //! `colorDialog.working.<id>`, `colorDialog.wideGamut`, `colorDialog.autoToneMap`,
 //! `colorDialog.ok`, `colorDialog.cancel`.
+//!
+//! [`STANDARD_PIXEL_ASPECTS`]: filmcraft_project::STANDARD_PIXEL_ASPECTS
 
 use filmcraft_color::{ColorSpace, WorkingSpace};
 use serde_json::{Value, json};
@@ -30,7 +33,30 @@ pub fn open_interpret(app: &mut FilmcraftApp, params: &Value) {
         .and_then(|i| app.session.execute("media.colorInfo", json!({"item": i})).ok())
         .and_then(|v| v["override"].as_str().map(str::to_string))
         .unwrap_or_else(|| "auto".into());
-    app.ui.color_dialog = Some(ColorDialog::Interpret { items, color_space: current });
+    // the first item's pixel aspect override, "file" when it uses the file's ratio
+    let pixel_aspect = items
+        .first()
+        .and_then(|i| app.session.project.item(filmcraft_project::ItemId(*i)))
+        .and_then(|it| it.as_media())
+        .and_then(|m| m.interpret.par.and_then(filmcraft_project::checked_par))
+        .map_or_else(|| "file".to_string(), |(n, d)| format!("{n}:{d}"));
+    app.ui.color_dialog = Some(ColorDialog::Interpret { items, color_space: current, pixel_aspect });
+}
+
+/// The `[num, den]` of a dialog choice (`"num:den"`), None for "file" or anything else.
+fn par_choice(choice: &str) -> Option<(u32, u32)> {
+    let (n, d) = choice.split_once(':')?;
+    filmcraft_project::checked_par((n.parse().ok()?, d.parse().ok()?))
+}
+
+/// The pixel aspect ratio the first item's file reports (square when it reports none).
+fn file_par(app: &FilmcraftApp, items: &[u64]) -> (u32, u32) {
+    items
+        .first()
+        .and_then(|i| app.session.project.item(filmcraft_project::ItemId(*i)))
+        .and_then(|it| it.as_media())
+        .and_then(|m| m.info.video.as_ref())
+        .map_or((1, 1), |v| filmcraft_project::sane_par(v.par))
 }
 
 pub fn open_sequence(app: &mut FilmcraftApp) {
@@ -63,12 +89,13 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let mut apply: Option<(&'static str, Value)> = None;
     let mut close = false;
     match &mut d {
-        ColorDialog::Interpret { items, color_space } => {
+        ColorDialog::Interpret { items, color_space, pixel_aspect } => {
             let detected = items
                 .first()
                 .and_then(|i| app.session.execute("media.colorInfo", json!({"item": i})).ok())
                 .and_then(|v| v["detectedLabel"].as_str().map(str::to_string))
                 .unwrap_or_else(|| "—".into());
+            let from_file = file_par(app, items);
             let n = items.len();
             egui::Window::new(tl!("Interpret Footage"))
                 .id(egui::Id::new("Interpret Footage"))
@@ -78,15 +105,35 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 .default_width(380.0)
                 .show(ctx, |ui| {
                     ui.label(
-                        egui::RichText::new(if n == 1 { tlf!("Color Management · {n} item", n) } else { tlf!("Color Management · {n} items", n) }).strong(),
+                        egui::RichText::new(if n == 1 { tlf!("Pixel Aspect Ratio · {n} item", n) } else { tlf!("Pixel Aspect Ratio · {n} items", n) }).strong(),
                     );
+                    let file_label = filmcraft_project::pixel_aspect_label(from_file);
+                    if radio(app, ui, "colorDialog.par.file", pixel_aspect == "file", &tlf!("Use Pixel Aspect Ratio from File: {par}", par = file_label)) {
+                        *pixel_aspect = "file".into();
+                    }
+                    ui.label(tl!("Conform to:"));
+                    // an anamorphic squeeze: a 1.33x lens on a 16:9 sensor records 4:3 pixels
+                    for (label, (num, den)) in filmcraft_project::STANDARD_PIXEL_ASPECTS {
+                        let choice = format!("{num}:{den}");
+                        if radio(app, ui, &format!("colorDialog.par.{num}x{den}"), *pixel_aspect == choice, label) {
+                            *pixel_aspect = choice;
+                        }
+                    }
+                    if let Some(par) = par_choice(pixel_aspect)
+                        && !filmcraft_project::STANDARD_PIXEL_ASPECTS.iter().any(|(_, p)| *p == par)
+                    {
+                        let label = filmcraft_project::pixel_aspect_label(par);
+                        radio(app, ui, &format!("colorDialog.par.{}x{}", par.0, par.1), true, &label);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(tl!("Color Management")).strong());
                     ui.label(tlf!("Media colour space (from file metadata): {detected}", detected));
                     ui.add_space(4.0);
                     ui.label(tl!("Override media colour space:"));
                     if radio(app, ui, "colorDialog.space.auto", color_space == "auto", tl!("Use file metadata")) {
                         *color_space = "auto".into();
                     }
-                    egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                         for cs in ColorSpace::ALL {
                             if radio(app, ui, &format!("colorDialog.space.{}", cs.id()), color_space == cs.id(), cs.label()) {
                                 *color_space = cs.id().into();
@@ -95,7 +142,11 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     });
                     let (ok, cancel) = buttons(app, ui);
                     if ok {
-                        apply = Some(("clip.interpretFootage", json!({"items": items, "colorSpace": color_space})));
+                        let par = match par_choice(pixel_aspect) {
+                            Some((num, den)) => json!([num, den]),
+                            None => json!("file"),
+                        };
+                        apply = Some(("clip.interpretFootage", json!({"items": items, "colorSpace": color_space, "pixelAspect": par})));
                     }
                     close = ok || cancel;
                 });
