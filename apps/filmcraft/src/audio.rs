@@ -187,7 +187,7 @@ impl CpalOut {
                 if buf.len() > 1_048_576 || scratch.try_reserve(buf.len().saturating_sub(scratch.len())).is_err() {
                     buf.fill(T::EQUILIBRIUM);
                     if !health.failed.swap(true, Ordering::SeqCst) {
-                        log::error!("unable to allocate the audio conversion buffer");
+                        health.pending.store(FAILED_BUFFER, Ordering::SeqCst);
                     }
                     return;
                 }
@@ -278,6 +278,23 @@ struct Health {
     failed: AtomicBool,
     /// The first error of a stream has been printed.
     reported: AtomicBool,
+    /// A failure the audio callback noticed and left for [`Health::log_pending`] to log: the
+    /// callback must not wait on the logger's stderr and file writes. One of the `FAILED_*` codes.
+    pending: std::sync::atomic::AtomicU8,
+}
+
+const FAILED_BUFFER: u8 = 1;
+const FAILED_MIXER: u8 = 2;
+
+impl Health {
+    /// Log the failure the audio callback left, once (off the audio thread).
+    fn log_pending(&self) {
+        match self.pending.swap(0, Ordering::SeqCst) {
+            FAILED_BUFFER => log::error!("unable to allocate the audio conversion buffer"),
+            FAILED_MIXER => log::error!("the audio mixer failed; playing without sound"),
+            _ => {}
+        }
+    }
 }
 
 impl Health {
@@ -356,7 +373,7 @@ fn render(fill: &Mutex<Fill>, buf: &mut [f32], channels: usize, played: &AtomicU
     if health.failed.load(Ordering::SeqCst) || catch_unwind(AssertUnwindSafe(|| (*guard)(buf, channels))).is_err() {
         buf.fill(0.0);
         if !health.failed.swap(true, Ordering::SeqCst) {
-            log::error!("the audio mixer failed; playing without sound");
+            health.pending.store(FAILED_MIXER, Ordering::SeqCst);
         }
         return;
     }
@@ -396,8 +413,10 @@ impl AudioOut for CpalOut {
     fn stop(&mut self) {
         self.stream = None;
         self.fill = None;
+        self.health.log_pending();
     }
     fn recover(&mut self) {
+        self.health.log_pending();
         if self.stream.is_none() || self.health.failed.load(Ordering::SeqCst) {
             return;
         }
@@ -573,9 +592,14 @@ mod tests {
         assert_eq!(buf, [0.0; 4]);
         assert_eq!(played.load(Ordering::SeqCst), 0);
         assert!(health.failed.load(Ordering::SeqCst));
+        // the callback leaves the failure for the UI thread to log, once
+        assert_eq!(health.pending.load(Ordering::SeqCst), FAILED_MIXER);
+        health.log_pending();
+        assert_eq!(health.pending.load(Ordering::SeqCst), 0);
         // later callbacks stay silent instead of re-entering the broken mixer
         buf = [1.0; 4];
         render(&fill, &mut buf, 2, &played, &health);
         assert_eq!(buf, [0.0; 4]);
+        assert_eq!(health.pending.load(Ordering::SeqCst), 0, "reported once");
     }
 }
