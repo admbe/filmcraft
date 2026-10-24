@@ -33,6 +33,13 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
         return Some(app.select_in_workspace_set(WorkspaceSet::Evolve, name).map(|()| json!({"workspace": name, "workspaceSet": WorkspaceSet::Evolve.id()})));
     }
     let ws = id.strip_prefix("window.workspace.")?;
+    // a Standard workspace's id is that workspace even on an Evolve page of the same name (Color,
+    // Audio), which has its own `window.page.*`
+    if app.workspaces.set != WorkspaceSet::Standard
+        && let Some(n) = dock::WORKSPACES.iter().find(|n| slug(n) == ws)
+    {
+        return Some(app.select_in_workspace_set(WorkspaceSet::Standard, n).map(|()| json!({"workspace": n, "workspaceSet": WorkspaceSet::Standard.id()})));
+    }
     let arg = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
     let r = match ws {
         "reset" => {
@@ -58,10 +65,7 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
         "rename" => rename(app, &arg("from").unwrap_or_default(), &arg("to").unwrap_or_default()),
         "delete" => delete(app, &arg("name").unwrap_or_default()),
         key => match dock::names(&app.workspaces).into_iter().find(|n| slug(n) == key) {
-            Some(n) => {
-                app.set_workspace(&n);
-                Ok(json!({"workspace": n}))
-            }
+            Some(n) => app.select_in_workspace_set(app.workspaces.set, &n).map(|()| json!({"workspace": n})),
             // a built-in workspace of the other set (a Standard-set key pressed on a Evolve page,
             // a Evolve page asked for in the Standard set): switch sets and show it
             None => match WorkspaceSet::ALL.into_iter().find_map(|set| set.builtins().iter().find(|n| slug(n) == key).map(|n| (set, *n))) {

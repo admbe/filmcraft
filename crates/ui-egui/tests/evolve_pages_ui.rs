@@ -244,6 +244,33 @@ fn workspace_set_switch_completes_when_the_file_cannot_be_written() {
     let r = d.call("ui.set", json!({"workspaceSet": "evolve", "workspace": "Audio"}));
     assert_eq!(r["ok"], false, "{r}");
     assert_eq!((d.app().workspaces.set, d.workspace().as_str()), (WorkspaceSet::Evolve, "Audio"));
+    // a page of the set in use: shown, and the failed save is reported too
+    let r = d.call("ui.menu.invoke", json!({"command": "window.page.cut", "params": {}}));
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!((d.app().workspaces.set, d.workspace().as_str()), (WorkspaceSet::Evolve, "Cut"));
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn standard_workspace_ids_switch_sets_even_on_a_namesake_page() {
+    let data = data_dir("namesake");
+    let mut d = Driver::launch(&data);
+    d.menu("window.page.edit", json!({}));
+    // Window ▸ Workspaces ▸ Color (Alt+Shift+3) of the Standard set, though Evolve has a Color page
+    let r = d.menu("window.workspace.color", json!({}));
+    assert_eq!((r["workspace"].as_str(), r["workspaceSet"].as_str()), (Some("Color"), Some("standard")));
+    assert_eq!((d.app().workspaces.set, d.workspace().as_str()), (WorkspaceSet::Standard, "Color"));
+    assert_eq!(d.app().ui.dock, filmcraft_ui_egui::dock::workspace("Color"));
+    // the Color page is `window.page.color`
+    d.menu("window.page.color", json!({}));
+    assert_eq!((d.app().workspaces.set, d.workspace().as_str()), (WorkspaceSet::Evolve, "Color"));
+    assert_eq!(d.app().ui.dock, filmcraft_ui_egui::dock::evolve_page("Color"));
+    // a workspace of the user's own in the Evolve set is still found by its id there
+    d.menu("window.workspace.saveAs", json!({"name": "Grade"}));
+    d.menu("window.page.edit", json!({}));
+    let r = d.menu("window.workspace.grade", json!({}));
+    assert_eq!(r["workspace"], "Grade");
+    assert_eq!((d.app().workspaces.set, d.workspace().as_str()), (WorkspaceSet::Evolve, "Grade"));
     let _ = std::fs::remove_dir_all(&data);
 }
 

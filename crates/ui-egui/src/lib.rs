@@ -890,14 +890,27 @@ impl FilmcraftApp {
 
     /// Switch to workspace set `set` and show its workspace `name` (a page or a workspace asked for
     /// by name). The workspace is shown even when `workspaces.json` can't be written; the save
-    /// error is returned after it.
+    /// error (of the set, else of the workspace) is returned after it.
     pub fn select_in_workspace_set(&mut self, set: dock::WorkspaceSet, name: &str) -> Result<(), String> {
         let saved = self.set_workspace_set(set);
-        self.set_workspace(name);
-        saved
+        let shown = self.show_workspace(name);
+        if let Err(e) = &shown {
+            self.ui.status = e.clone();
+        }
+        saved.and(shown)
     }
 
+    /// Show workspace `name` of the set in use; a failed save of `workspaces.json` goes to the
+    /// status line.
     pub fn set_workspace(&mut self, name: &str) {
+        if let Err(e) = self.show_workspace(name) {
+            self.ui.status = e;
+        }
+    }
+
+    /// [`Self::set_workspace`], returning the save of `workspaces.json` (the workspace is shown
+    /// either way).
+    fn show_workspace(&mut self, name: &str) -> Result<(), String> {
         self.ui.workspace = name.to_string();
         let layout = dock::saved_docking(&self.workspaces, name);
         self.ui.dock = layout.root;
@@ -912,16 +925,15 @@ impl FilmcraftApp {
                 self.ui.mode = state::Mode::Edit;
             }
         }
-        if self.workspaces.current != name {
-            let mut next = self.workspaces.clone();
-            next.current = name.to_string();
-            if let Err(e) = self.set_workspaces(next) {
-                self.ui.status = e;
-            }
-        }
         if name == "Color" {
             self.ui.show_scopes = false;
         }
+        if self.workspaces.current != name {
+            let mut next = self.workspaces.clone();
+            next.current = name.to_string();
+            return self.set_workspaces(next);
+        }
+        Ok(())
     }
 
     pub fn show_panel(&mut self, p: PanelKind) {
