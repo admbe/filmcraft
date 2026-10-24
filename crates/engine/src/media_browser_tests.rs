@@ -75,9 +75,9 @@ impl Services for FakeFs {
     }
     fn volumes(&self) -> Vec<Volume> {
         vec![
-            Volume { name: "Macintosh HD".into(), path: "/".into(), kind: VolumeKind::Local },
-            Volume { name: "Card".into(), path: "/Volumes/Card".into(), kind: VolumeKind::Local },
-            Volume { name: "Studio".into(), path: "/Network/Studio".into(), kind: VolumeKind::Network },
+            Volume { name: "Macintosh HD".into(), path: "/".into(), kind: VolumeKind::Local, pending: false },
+            Volume { name: "Card".into(), path: "/Volumes/Card".into(), kind: VolumeKind::Local, pending: false },
+            Volume { name: "Studio".into(), path: "/Network/Studio".into(), kind: VolumeKind::Network, pending: false },
         ]
     }
     fn home_dir(&self) -> Option<String> {
@@ -326,4 +326,67 @@ fn ale_logs_are_not_offered_for_import() {
     assert_eq!(media_browser::kind_of("clips.ale"), None);
     assert!(!media_browser::extensions().contains(&"ale"));
     assert_eq!(media_browser::kind_of("cut.edl"), Some("project"));
+}
+
+/// A file system whose drives and directories take `delay` to answer (a network share that is
+/// slow or gone), on top of [`FakeFs`].
+struct SlowFs {
+    fs: FakeFs,
+    delay: std::time::Duration,
+}
+
+impl Services for SlowFs {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.fs.read_file(path)
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        self.fs.write_file(path, data)
+    }
+    fn file_size(&self, path: &str) -> std::io::Result<u64> {
+        self.fs.file_size(path)
+    }
+    fn list_entries(&self, dir: &str) -> Option<std::io::Result<Vec<DirEntry>>> {
+        std::thread::sleep(self.delay);
+        self.fs.list_entries(dir)
+    }
+    fn volumes(&self) -> Vec<Volume> {
+        std::thread::sleep(self.delay);
+        self.fs.volumes()
+    }
+    fn home_dir(&self) -> Option<String> {
+        self.fs.home_dir()
+    }
+}
+
+/// A field report: `mediaBrowser.roots`, asked every frame the panel is open, looked at every drive
+/// on the UI thread, and two SMB shares that did not answer froze the window for 13.8 s and 16.1 s.
+/// The drives and the listings are read off the calling thread now: a share that does not answer
+/// shows as being looked at, and the call returns at once.
+#[test]
+fn a_drive_that_does_not_answer_never_holds_up_the_caller() {
+    let delay = std::time::Duration::from_millis(1500);
+    let mut s = Session::new(Arc::new(SlowFs { fs: FakeFs::new(), delay }));
+    let quick = std::time::Duration::from_millis(500);
+    let t = std::time::Instant::now();
+    let roots = s.execute("mediaBrowser.roots", json!({})).unwrap();
+    assert!(t.elapsed() < quick, "roots took {:?}", t.elapsed());
+    assert_eq!(roots["scanning"], true, "{roots}");
+    // the panel's listing: pending at first, the entries once they are read
+    let services = s.services.clone();
+    let t = std::time::Instant::now();
+    assert!(matches!(s.browser.io.listing(&services, "/home/me/Movies", "all"), media_browser::Listing::Pending));
+    assert!(t.elapsed() < quick, "listing took {:?}", t.elapsed());
+    // navigating to it does not wait for it either
+    let t = std::time::Instant::now();
+    s.execute("mediaBrowser.navigate", json!({"path": "/home/me/Movies"})).unwrap();
+    assert!(t.elapsed() < quick + delay / 2, "navigate took {:?}", t.elapsed());
+    // the reads finish on their own
+    std::thread::sleep(delay + std::time::Duration::from_millis(500));
+    let roots = s.execute("mediaBrowser.roots", json!({})).unwrap();
+    assert_eq!(roots["scanning"], false, "{roots}");
+    assert_eq!(roots["localDrives"].as_array().map(Vec::len), Some(2));
+    match s.browser.io.listing(&services, "/home/me/Movies", "all") {
+        media_browser::Listing::Ready(v) => assert!(v.iter().any(|e| e.name == "b-roll.wav")),
+        other => panic!("{other:?}"),
+    }
 }
