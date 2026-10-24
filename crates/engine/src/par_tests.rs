@@ -399,3 +399,27 @@ fn a_subclip_of_an_anamorphic_clip_makes_the_same_desqueezed_sequence() {
     assert_eq!(r["desqueezed"], false);
     assert_eq!(s.active_sequence().unwrap().settings.par, (133, 100), "a subclip keeps its parent's pixels");
 }
+
+/// A sequence from a clip (or its subclip) takes the frame rate the clip is interpreted with, and
+/// is named with it.
+#[test]
+fn a_sequence_from_a_clip_uses_its_interpreted_frame_rate() {
+    let mut s = Session::default();
+    s.execute("file.newSequence", json!({"name": "Rate", "fps": 23.976})).unwrap();
+    let r = s.execute("file.newColorMatte", json!({"color": "#ff0000", "width": 640, "height": 360, "seconds": 2.0})).unwrap();
+    let item = ItemId(r["item"].as_u64().unwrap());
+    let file_rate = s.project.item(item).and_then(|i| i.as_media()).map(|m| m.info.frame_rate()).unwrap();
+    let rate = if file_rate == FrameRate::FPS_25 { FrameRate::FPS_23_976 } else { FrameRate::FPS_25 };
+    if let Some(ItemKind::Media(m)) = Arc::make_mut(&mut s.project).item_mut(item).map(|i| &mut i.kind) {
+        m.interpret.frame_rate = Some(rate);
+    }
+    let sub = ItemId(s.execute("clip.makeSubclip", json!({"item": item.0, "name": "Sub"})).unwrap()["item"].as_u64().unwrap());
+    for from in [item, sub] {
+        s.execute("file.newSequence", json!({"name": "From", "fromItem": from.0})).unwrap();
+        let st = s.active_sequence().unwrap().settings.clone();
+        assert_eq!(st.frame_rate, rate, "{from:?}");
+        assert_eq!(st.preset, format!("640x360 {}", rate.label()), "{from:?}");
+    }
+    let r = s.execute("file.newSequenceFromClip", json!({"items": [sub.0]})).unwrap();
+    assert_eq!(s.project.sequence(ItemId(r["sequence"].as_u64().unwrap())).unwrap().settings.frame_rate, rate);
+}
