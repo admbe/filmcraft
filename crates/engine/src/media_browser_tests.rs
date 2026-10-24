@@ -523,14 +523,25 @@ fn a_fresh_read_still_going_is_pending() {
 fn navigating_to_a_folder_being_read_again_says_pending() {
     let delay = std::time::Duration::from_millis(400);
     let mut s = Session::new(Arc::new(SlowFs { fs: FakeFs::new(), delay, reads: Default::default() }));
+    // waits (bounded) until no read of `dir` is going, so the steps do not race the reads
+    let settle = |s: &Session, dir: &str| {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while s.browser.io.is_reading(dir) {
+            assert!(std::time::Instant::now() < until, "{dir} still being read");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
     s.execute("mediaBrowser.navigate", json!({"path": "/home/me/Movies"})).unwrap();
-    std::thread::sleep(delay + std::time::Duration::from_millis(300));
+    settle(&s, "/home/me/Movies");
     s.execute("mediaBrowser.navigate", json!({"path": "/home/me"})).unwrap();
-    std::thread::sleep(delay + std::time::Duration::from_millis(300));
+    settle(&s, "/home/me");
     let out = s.execute("mediaBrowser.navigate", json!({"path": "/home/me/Movies"})).unwrap();
+    // the read again takes `delay`, far longer than navigate waits for it
+    assert!(s.browser.io.is_reading("/home/me/Movies"), "read again: {out}");
     assert_eq!(out["pending"], true, "{out}");
     assert!(out["entries"].as_array().is_some_and(|e| !e.is_empty()), "the last entries are kept: {out}");
-    std::thread::sleep(delay + std::time::Duration::from_millis(300));
+    settle(&s, "/home/me/Movies");
+    settle(&s, "/home/me");
     let out = s.execute("mediaBrowser.navigate", json!({"back": true})).unwrap();
     assert_eq!(out["dir"], "/home/me", "{out}");
 }
