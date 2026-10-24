@@ -8,6 +8,11 @@
 //! Lumetri Presets (Effects panel): `lumetri.presets` lists them, `lumetri.applyPreset` adds a
 //! Lumetri Color configured as the preset to clips (one undo step), `lumetri.presetThumbnails`
 //! renders a folder's thumbnail grid (our Lumetri on the procedural preview picture) to a PNG.
+//!
+//! LUT folders: `.cube` / `.3dl` files under `FILMCRAFT_LUT_DIR` (a path list), `<exe dir>/LUTs`
+//! and `<data dir>/LUTs` are listed by `lut.folders` and offered in the Lumetri LUT menus grouped
+//! by subfolder; choosing one imports it into the project library (`lumetri.setInputLut {path}`),
+//! so the project stays self-contained.
 
 use filmcraft_color::{ColorSpace, Lut, LutFormat, WorkingSpace};
 use filmcraft_project::{ClipId, ItemId, ItemKind, ParamValue, ProjectLut, TrackKind};
@@ -56,6 +61,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         query("media.colorInfo", "Media Colour Info", r#"{"item":id}"#, color_info),
         spec("lut.import", "Import LUT…", &[], r#"{"path":str,"name":str?}"#, always, import),
         query("lut.list", "List LUTs", "{}", list),
+        query("lut.folders", "List LUT Folders", "{}", folders),
         spec("lut.remove", "Remove LUT", &[], r#"{"id":str}"#, always, remove),
         query("lut.export", "Export LUT", r#"{"lut":"lib:<id>"|"builtin:<id>","path":str,"format":"cube"|"3dl"?}"#, export),
         spec("lumetri.setInputLut", "Set Input LUT", &[], r#"{"clip":id?,"lut":"lib:<id>"|"builtin:<id>"|""?,"path":str?}"#, has_seq, |s, p| {
@@ -116,6 +122,105 @@ fn import_lut(s: &mut Session, path: &str, name: Option<&str>) -> Result<(String
 fn import(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("lut.import", "need `path`"))?.to_string();
     Ok(import_lut(s, &path, str_p(p, "name"))?.1)
+}
+
+/// A LUT file found in one of the [`lut_folders`]: `group` is its folder relative to the LUT
+/// folder (the folder's own name at the top level), `name` the file stem.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct FolderLut {
+    pub group: String,
+    pub name: String,
+    pub path: String,
+}
+
+/// At most this many files are listed, this deep: a LUT folder pointed at a whole drive must not
+/// stall the menu.
+const MAX_FOLDER_LUTS: usize = 2000;
+const MAX_FOLDER_DEPTH: usize = 4;
+
+/// The LUT folders, in menu order: every entry of `FILMCRAFT_LUT_DIR` (a `PATH`-style list), then
+/// `LUTs` beside the executable, then `LUTs` in the data directory. Missing folders are fine.
+pub fn lut_folders() -> Vec<std::path::PathBuf> {
+    let mut v: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(list) = std::env::var_os("FILMCRAFT_LUT_DIR") {
+        v.extend(std::env::split_paths(&list).filter(|p| !p.as_os_str().is_empty()));
+    }
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("LUTs"))) {
+        v.push(dir);
+    }
+    if let Some(d) = crate::autosave::default_data_dir() {
+        v.push(d.join("LUTs"));
+    }
+    v.dedup();
+    v
+}
+
+/// The LUT files under `folders`, sorted by group then name (case-insensitively). Hidden entries
+/// (a leading `.`) are skipped; unreadable folders are empty.
+pub fn scan_lut_folders(folders: &[std::path::PathBuf]) -> Vec<FolderLut> {
+    let mut out = Vec::new();
+    for root in folders {
+        walk_lut_folder(root, root, 0, &mut out);
+    }
+    out.sort_by_cached_key(|l| (l.group.to_lowercase(), l.name.to_lowercase(), l.path.clone()));
+    out
+}
+
+fn walk_lut_folder(root: &std::path::Path, dir: &std::path::Path, depth: usize, out: &mut Vec<FolderLut>) {
+    if depth > MAX_FOLDER_DEPTH || out.len() >= MAX_FOLDER_LUTS {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = rd.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        if out.len() >= MAX_FOLDER_LUTS {
+            return;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = e.path();
+        if path.is_dir() {
+            walk_lut_folder(root, &path, depth.saturating_add(1), out);
+        } else if LutFormat::from_path(&name).is_some() {
+            let group = match path.parent().and_then(|p| p.strip_prefix(root).ok()).filter(|r| !r.as_os_str().is_empty()) {
+                Some(rel) => rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect::<Vec<_>>().join(" / "),
+                None => root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "LUTs".into()),
+            };
+            let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(name);
+            out.push(FolderLut { group, name: stem, path: path.to_string_lossy().to_string() });
+        }
+    }
+}
+
+/// The LUT folders' contents for the menus, rescanned at most every few seconds (the menu asks
+/// every frame while open; a folder of a few thousand files is a noticeable read).
+pub fn folder_luts() -> std::sync::Arc<Vec<FolderLut>> {
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+    use std::time::Duration;
+    use web_time::Instant;
+    static CACHE: OnceLock<Mutex<Option<(Instant, Arc<Vec<FolderLut>>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let mut slot = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((at, luts)) = slot.as_ref()
+        && at.elapsed() < Duration::from_secs(3)
+    {
+        return luts.clone();
+    }
+    let luts = Arc::new(scan_lut_folders(&lut_folders()));
+    *slot = Some((Instant::now(), luts.clone()));
+    luts
+}
+
+fn folders(_: &mut Session, _: &Value) -> Result<Value> {
+    let folders = lut_folders();
+    let luts = scan_lut_folders(&folders);
+    Ok(json!({
+        "folders": folders.iter().map(|f| json!({"path": f.to_string_lossy(), "exists": f.is_dir()})).collect::<Vec<_>>(),
+        "luts": luts,
+    }))
 }
 
 fn list(s: &mut Session, _: &Value) -> Result<Value> {

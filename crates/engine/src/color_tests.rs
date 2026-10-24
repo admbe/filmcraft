@@ -91,6 +91,44 @@ fn import_lut_set_input_and_look_then_undo() {
 }
 
 #[test]
+fn lut_folders_list_cube_and_3dl_files_grouped_by_subfolder() {
+    let root = std::env::temp_dir().join(format!("filmcraft-lut-folders-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for (rel, text) in [
+        ("Creative/RED_LUSH.cube", "TITLE \"x\"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n"),
+        ("Creative/sub/deep.3DL", "3DMESH\n"),
+        ("Creative/.hidden.cube", "nope"),
+        ("Creative/readme.txt", "not a LUT"),
+        ("top.cube", "LUT_3D_SIZE 2\n"),
+    ] {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    let luts = crate::color::scan_lut_folders(&[root.clone(), root.join("missing")]);
+    let seen: Vec<(String, String)> = luts.iter().map(|l| (l.group.clone(), l.name.clone())).collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("Creative".to_string(), "RED_LUSH".to_string()),
+            ("Creative / sub".to_string(), "deep".to_string()),
+            (root.file_name().unwrap().to_string_lossy().to_string(), "top".to_string()),
+        ]
+    );
+    // a folder pick is an import plus the slot assignment: the project stays self-contained
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let path = luts[0].path.clone();
+    let r = s.execute("lumetri.setInputLut", json!({"clip": clip.0, "path": path})).unwrap();
+    assert!(r["lut"].as_str().unwrap().starts_with("lib:"));
+    assert_eq!(s.project.luts[0].source_path.as_deref(), Some(luts[0].path.as_str()));
+    // the query itself never fails, whatever the folders hold
+    let q = s.execute("lut.folders", json!({})).unwrap();
+    assert!(q["folders"].is_array() && q["luts"].is_array());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn export_builtin_and_library_luts() {
     let mut s = demo();
     for (fmt, ext) in [("cube", "cube"), ("3dl", "3dl")] {
