@@ -7,7 +7,7 @@
 //! Media Browser, files dropped on the window) ask for this; scripted callers keep the synchronous
 //! import, whose result lists every item.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -17,6 +17,10 @@ use serde_json::{Value, json};
 use crate::commands::{Prefetched, import_prefetched, open_concurrently};
 use crate::{EngineError, Result, Session};
 
+/// What the worker has opened, by path: one result per occurrence of the path, in the order
+/// they finished (a path given twice is opened, and added, twice).
+type Opened = Arc<Mutex<HashMap<String, VecDeque<Prefetched>>>>;
+
 /// An import whose files are still being opened.
 pub struct Pending {
     pub job: u64,
@@ -24,7 +28,7 @@ pub struct Pending {
     paths: Vec<String>,
     /// The next path to add: results are added in the order of `paths`.
     next: usize,
-    opened: Arc<Mutex<HashMap<String, Prefetched>>>,
+    opened: Opened,
     items: Vec<ItemId>,
     errors: Vec<String>,
     started: web_time::Instant,
@@ -52,13 +56,13 @@ pub(crate) fn start(s: &mut Session, paths: Vec<String>, bin: Option<BinId>) -> 
         result: Default::default(),
     };
     job.progress.total.store(n as u64, Ordering::Relaxed);
-    let opened: Arc<Mutex<HashMap<String, Prefetched>>> = Arc::default();
+    let opened: Opened = Arc::default();
     let (progress, result, sink) = (job.progress.clone(), job.result.clone(), opened.clone());
     let (media, services, todo) = (s.media.clone(), s.services.clone(), paths.clone());
     let run = move || {
         let t0 = web_time::Instant::now();
         open_concurrently(&media, &*services, &todo, Some(&progress.cancel), &|path: &str, r: Prefetched| {
-            sink.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_string(), r);
+            sink.lock().unwrap_or_else(|e| e.into_inner()).entry(path.to_string()).or_default().push_back(r);
             progress.done.fetch_add(1, Ordering::Relaxed);
             *progress.status.lock().unwrap_or_else(|e| e.into_inner()) =
                 std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
@@ -122,7 +126,7 @@ pub fn poll(s: &mut Session) {
             let mut opened = pending.opened.lock().unwrap_or_else(|e| e.into_inner());
             let mut ready = Vec::new();
             while let Some(path) = pending.paths.get(pending.next) {
-                match opened.remove(path) {
+                match opened.get_mut(path).and_then(VecDeque::pop_front) {
                     Some(r) => ready.push((path.clone(), r)),
                     None if ended => not_opened += 1,
                     None => break,

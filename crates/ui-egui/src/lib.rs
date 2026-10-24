@@ -366,10 +366,13 @@ pub struct FilmcraftApp {
     timeline_view_of: Option<filmcraft_engine::project::ItemId>,
     /// Items imported by an OS file drop, to place on the Timeline at the drop point this frame.
     pending_timeline_drop: Option<(Vec<filmcraft_engine::project::ItemId>, egui::Pos2)>,
-    /// Files dropped from the OS with "drop imports to the timeline": the background import's
-    /// job, the drop point and the items the drop imported at once. When the import finishes
-    /// those items and its own become [`Self::pending_timeline_drop`] for the Timeline to place.
-    drop_import: Option<(u64, egui::Pos2, Vec<filmcraft_engine::project::ItemId>)>,
+    /// Files dropped from the OS with "drop imports to the timeline" whose background import is
+    /// still running: its job, the drop point and the items the drop imported at once. When the
+    /// import finishes those items and its own join [`Self::ready_drops`].
+    drop_imports: Vec<(u64, egui::Pos2, Vec<filmcraft_engine::project::ItemId>)>,
+    /// Dropped files imported and waiting for the Timeline, oldest first: one a frame becomes
+    /// [`Self::pending_timeline_drop`], so drops that finish in the same frame are all placed.
+    ready_drops: std::collections::VecDeque<(Vec<filmcraft_engine::project::ItemId>, egui::Pos2)>,
     /// Files being dragged over the window from the OS (count, pointer): the Timeline previews where they would land.
     file_drag_hover: Option<(usize, egui::Pos2)>,
     timeline_view_last: Option<filmcraft_engine::project::SequenceView>,
@@ -602,7 +605,8 @@ impl FilmcraftApp {
             last_timeline_width: 1000.0,
             timeline_view_of: None,
             pending_timeline_drop: None,
-            drop_import: None,
+            drop_imports: Vec::new(),
+            ready_drops: std::collections::VecDeque::new(),
             file_drag_hover: None,
             timeline_view_last: None,
             fps: 60.0,
@@ -1507,8 +1511,8 @@ impl FilmcraftApp {
                     let now: Vec<filmcraft_engine::project::ItemId> =
                         v["items"].as_array().map(|a| a.iter().filter_map(|i| i.as_u64()).map(filmcraft_engine::project::ItemId).collect()).unwrap_or_default();
                     match (pointer, v["importJob"].as_u64()) {
-                        (Some(pos), Some(job)) => self.drop_import = Some((job, pos, now)),
-                        (Some(pos), None) if !now.is_empty() => self.pending_timeline_drop = Some((now, pos)),
+                        (Some(pos), Some(job)) => self.drop_imports.push((job, pos, now)),
+                        (Some(pos), None) if !now.is_empty() => self.ready_drops.push_back((now, pos)),
                         _ => {}
                     }
                 }
@@ -1853,12 +1857,11 @@ impl FilmcraftApp {
                 }
                 filmcraft_engine::Event::RevealInProject(item) => self.reveal_in_project(item),
                 filmcraft_engine::Event::ImportFinished { job, items } => {
-                    if self.drop_import.as_ref().is_some_and(|d| d.0 == job)
-                        && let Some((_, pos, mut placed)) = self.drop_import.take()
-                    {
+                    if let Some(k) = self.drop_imports.iter().position(|d| d.0 == job) {
+                        let (_, pos, mut placed) = self.drop_imports.remove(k);
                         placed.extend(items);
                         if !placed.is_empty() {
-                            self.pending_timeline_drop = Some((placed, pos));
+                            self.ready_drops.push_back((placed, pos));
                         }
                     }
                 }
@@ -1866,8 +1869,14 @@ impl FilmcraftApp {
                 filmcraft_engine::Event::ProjectChanged { .. } => {}
             }
         }
+        // a drop whose import was cancelled (the project was replaced) never finishes
+        let running = &self.session.background_imports;
+        self.drop_imports.retain(|d| running.iter().any(|p| p.job == d.0));
         self.sync_timeline_view();
         self.handle_drops(&ctx);
+        if self.pending_timeline_drop.is_none() {
+            self.pending_timeline_drop = self.ready_drops.pop_front();
+        }
         if let Some(rx) = self.command_inbox.take() {
             while let Ok(id) = rx.try_recv() {
                 // control-only mode ignores native menu commands, but Quit stays available (#1943)

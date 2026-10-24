@@ -159,6 +159,28 @@ fn a_file_the_drop_imports_at_once_is_placed_too() {
     assert_eq!(clip_counts(&h), (1, 0), "the sequence is on the timeline; status: {}", h.state().ui.status);
 }
 
+/// A second drop while the first one's files were still importing replaced the first: its files
+/// went to the bin only. Each drop is now placed where it was dropped.
+#[test]
+fn a_drop_while_another_is_importing_places_both() {
+    let mut h = harness();
+    let stills: Vec<PathBuf> = (0..6).map(|i| still(&format!("drop_first_{i}.png"))).collect();
+    let (v1, a1) = (point_on_row(&h, "timeline.track.V1.target"), point_on_row(&h, "timeline.track.A1.target"));
+    pointer_to(&mut h, v1);
+    for f in &stills {
+        h.input_mut().dropped_files.push(std::sync::Arc::new(OsFile(f.clone())));
+    }
+    step(&mut h);
+    h.input_mut().dropped_files.clear();
+    // the next frame, before the first import has necessarily finished
+    pointer_to(&mut h, a1);
+    h.input_mut().dropped_files.push(std::sync::Arc::new(OsFile(tone("drop_second.wav"))));
+    step(&mut h);
+    h.input_mut().dropped_files.clear();
+    settle_imports(&mut h);
+    assert_eq!(clip_counts(&h), (6, 1), "both drops are placed; status: {}", h.state().ui.status);
+}
+
 #[test]
 fn still_dropped_on_an_audio_row_goes_to_the_video_track_without_error() {
     // a video-only item over an audio row: the picture takes the matching video track, no error

@@ -1,14 +1,13 @@
 //! Background imports that cannot finish normally: a worker that ended before opening every
 //! file, and a project replaced while its files are still opening.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use super::{Pending, poll};
+use super::{Opened, Pending, poll};
 use crate::Session;
 use crate::commands::{Prefetched, open_concurrently};
 
@@ -26,10 +25,10 @@ fn an_import_whose_worker_ended_early_finishes_with_the_files_it_opened() {
     let paths: Vec<String> = (0..3).map(|i| write_wav(&dir.join(format!("ended{i}.wav")), 0.5)).collect();
     let mut s = Session::default();
     // the worker opened the first and the last file, then died
-    let opened: Arc<Mutex<HashMap<String, Prefetched>>> = Arc::default();
+    let opened: Opened = Arc::default();
     for p in [&paths[0], &paths[2]] {
         open_concurrently(&s.media, &*s.services, std::slice::from_ref(p), None, &|path: &str, r: Prefetched| {
-            opened.lock().unwrap().insert(path.to_string(), r);
+            opened.lock().unwrap().entry(path.to_string()).or_default().push_back(r);
         });
     }
     let job = crate::Job { id: 1, label: "Import 3 files".into(), progress: Default::default(), result: Default::default() };
@@ -61,6 +60,35 @@ fn an_import_whose_worker_ended_early_finishes_with_the_files_it_opened() {
     let names: Vec<String> = items.iter().map(|i| s.project.item(*i).unwrap().name.clone()).collect();
     assert_eq!(names, ["ended0.wav", "ended2.wav"], "the files that were opened are added, in order");
     assert!(s.log.entries.iter().any(|e| e.message.contains("1 of 3 files not imported")), "the missing file is reported");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A path given twice is opened twice; the results used to be kept by path, so the second
+/// occurrence was reported as not imported. The background import now adds what the synchronous
+/// import adds.
+#[test]
+fn a_path_given_twice_imports_as_the_synchronous_import_does() {
+    let dir = crate::media_test_util::tmp_dir("background-import-twice");
+    let a = write_wav(&dir.join("twice-a.wav"), 0.5);
+    let b = write_wav(&dir.join("twice-b.wav"), 0.75);
+    let paths = [a.clone(), a, b];
+    let names = |s: &Session| -> Vec<String> {
+        let mut v: Vec<(u64, String)> = s.project.items.values().filter(|it| it.name.starts_with("twice-")).map(|it| (it.id.0, it.name.clone())).collect();
+        v.sort();
+        v.into_iter().map(|(_, n)| n).collect()
+    };
+    let mut sync = Session::default();
+    sync.execute("file.import", json!({ "paths": paths })).unwrap();
+    let mut s = Session::default();
+    s.execute("file.import", json!({ "paths": paths, "async": true })).unwrap();
+    let started = Instant::now();
+    while !s.background_imports.is_empty() && started.elapsed() < Duration::from_secs(30) {
+        poll(&mut s);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(s.background_imports.is_empty(), "the import finished");
+    assert_eq!(names(&s), names(&sync), "the same items, in the same order");
+    assert!(!s.log.entries.iter().any(|e| e.message.contains("not imported")), "no occurrence counts as not opened");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
