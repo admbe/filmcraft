@@ -200,15 +200,23 @@ fn picking_a_copy_of_a_library_lut_records_its_path() {
     let n = s.history.undo.len();
     s.execute("lut.import", json!({"path": p2})).unwrap();
     assert_eq!(s.history.undo.len(), n);
-    // a failed assignment changes nothing: the path stays, no undo step, no new entry
+    // a bad target changes nothing, even with the undo history full (where an edit would drop
+    // its oldest step): the path stays, no new entry, the same history
     let p3 = base.join("three.cube").to_string_lossy().to_string();
     let p4 = base.join("four.cube").to_string_lossy().to_string();
     std::fs::write(&p3, text).unwrap();
     std::fs::write(&p4, text.replace("1 1 1", "0.5 0.5 0.5")).unwrap();
+    s.history.limit = s.history.undo.len();
+    let labels = |s: &Session| s.history.undo.iter().map(|(l, _)| l.clone()).collect::<Vec<_>>();
+    let before = labels(&s);
+    let revision = s.revision;
+    s.state.selection = vec![];
     for path in [&p3, &p4] {
         assert!(s.execute("lumetri.setInputLut", json!({"clip": 9_999_999, "path": path})).is_err());
+        assert!(s.execute("lumetri.setLook", json!({"path": path})).is_err(), "no clip and nothing selected");
     }
-    assert_eq!(s.history.undo.len(), n);
+    assert_eq!(labels(&s), before);
+    assert_eq!(s.revision, revision);
     assert_eq!(s.project.luts.len(), 1);
     assert_eq!(s.project.luts[0].source_path.as_deref(), Some(p2.as_str()));
     std::fs::remove_dir_all(&base).unwrap();

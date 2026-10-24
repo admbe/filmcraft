@@ -306,23 +306,31 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// The target clip and the index of its Lumetri effect (applying Lumetri when missing).
 pub(crate) fn lumetri_clip(s: &mut Session, p: &Value, cmd: &str) -> Result<(ClipId, usize)> {
+    let clip = lumetri_target(s, p, cmd)?;
     let seq = s.active_sequence().ok_or_else(|| bad(cmd, "no active sequence"))?;
-    let video = |c: &ClipId| seq.find_item(*c).is_some_and(|(t, _)| seq.track(t).is_some_and(|t| t.kind == TrackKind::Video));
     let has = |c: &ClipId| seq.find_item(*c).is_some_and(|(_, it)| it.effects.iter().any(|e| e.effect == "lumetri"));
-    let clip = match clip_p(p, "clip") {
-        Some(c) if video(&c) => c,
-        Some(_) => return Err(bad(cmd, "not a video clip")),
-        None => {
-            let sel: Vec<ClipId> = s.state.selection.iter().copied().filter(video).collect();
-            sel.iter().copied().find(has).or(sel.first().copied()).ok_or_else(|| bad(cmd, "select a video clip"))?
-        }
-    };
     if !has(&clip) {
         s.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}))?;
     }
     let seq = s.active_sequence().ok_or_else(|| bad(cmd, "no active sequence"))?;
     let idx = seq.find_item(clip).and_then(|(_, it)| it.effects.iter().position(|e| e.effect == "lumetri")).ok_or_else(|| bad(cmd, "no Lumetri"))?;
     Ok((clip, idx))
+}
+
+/// The video clip [`lumetri_clip`] works on (`clip`, else the selected video clip with a Lumetri,
+/// else the first selected one), without changing anything.
+fn lumetri_target(s: &Session, p: &Value, cmd: &str) -> Result<ClipId> {
+    let seq = s.active_sequence().ok_or_else(|| bad(cmd, "no active sequence"))?;
+    let video = |c: &ClipId| seq.find_item(*c).is_some_and(|(t, _)| seq.track(t).is_some_and(|t| t.kind == TrackKind::Video));
+    let has = |c: &ClipId| seq.find_item(*c).is_some_and(|(_, it)| it.effects.iter().any(|e| e.effect == "lumetri"));
+    match clip_p(p, "clip") {
+        Some(c) if video(&c) => Ok(c),
+        Some(_) => Err(bad(cmd, "not a video clip")),
+        None => {
+            let sel: Vec<ClipId> = s.state.selection.iter().copied().filter(video).collect();
+            sel.iter().copied().find(has).or(sel.first().copied()).ok_or_else(|| bad(cmd, "select a video clip"))
+        }
+    }
 }
 
 /// Set a Lumetri parameter (inserting it when an older project's instance lacks it).
@@ -338,21 +346,9 @@ pub(crate) fn set_lumetri_param(s: &mut Session, clip: ClipId, idx: usize, param
 }
 
 fn set_lut(s: &mut Session, p: &Value, param: &str) -> Result<Value> {
-    // a failed assignment (say, a bad `clip` after the path was imported) leaves the project and
-    // its history as they were
-    let n0 = s.history.undo.len();
-    let r = set_lut_inner(s, p, param);
-    if r.is_err() && s.history.undo.len() > n0 {
-        while s.history.undo.len() > n0 {
-            s.undo();
-        }
-        s.history.redo.clear();
-    }
-    r
-}
-
-fn set_lut_inner(s: &mut Session, p: &Value, param: &str) -> Result<Value> {
     let cmd = if param == "input_lut" { "lumetri.setInputLut" } else { "lumetri.setLook" };
+    // the target first: a bad `clip` or no selection must not import the path
+    let target = lumetri_target(s, p, cmd)?;
     let r = match (str_p(p, "path"), str_p(p, "lut")) {
         (Some(path), _) => {
             let path = path.to_string();
@@ -364,7 +360,7 @@ fn set_lut_inner(s: &mut Session, p: &Value, param: &str) -> Result<Value> {
     if !r.is_empty() && filmcraft_render::luts::resolve(Some(&s.project), &r).is_none() {
         return Err(bad(cmd, format!("unknown LUT `{r}`")));
     }
-    let (clip, idx) = lumetri_clip(s, p, cmd)?;
+    let (clip, idx) = lumetri_clip(s, &json!({"clip": target.0}), cmd)?;
     set_lumetri_param(s, clip, idx, param, ParamValue::Text(r.clone()), if param == "input_lut" { "Input LUT" } else { "Creative Look" })?;
     Ok(json!({"clip": clip.0, "lut": r, "name": filmcraft_render::luts::label(Some(&s.project), &r)}))
 }
