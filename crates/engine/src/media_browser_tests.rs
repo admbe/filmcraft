@@ -333,6 +333,8 @@ fn ale_logs_are_not_offered_for_import() {
 struct SlowFs {
     fs: FakeFs,
     delay: std::time::Duration,
+    /// Directory reads so far.
+    reads: std::sync::atomic::AtomicUsize,
 }
 
 impl Services for SlowFs {
@@ -346,6 +348,7 @@ impl Services for SlowFs {
         self.fs.file_size(path)
     }
     fn list_entries(&self, dir: &str) -> Option<std::io::Result<Vec<DirEntry>>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::thread::sleep(self.delay);
         self.fs.list_entries(dir)
     }
@@ -365,7 +368,7 @@ impl Services for SlowFs {
 #[test]
 fn a_drive_that_does_not_answer_never_holds_up_the_caller() {
     let delay = std::time::Duration::from_millis(1500);
-    let mut s = Session::new(Arc::new(SlowFs { fs: FakeFs::new(), delay }));
+    let mut s = Session::new(Arc::new(SlowFs { fs: FakeFs::new(), delay, reads: Default::default() }));
     let quick = std::time::Duration::from_millis(500);
     let t = std::time::Instant::now();
     let roots = s.execute("mediaBrowser.roots", json!({})).unwrap();
@@ -389,4 +392,45 @@ fn a_drive_that_does_not_answer_never_holds_up_the_caller() {
         media_browser::Listing::Ready(v) => assert!(v.iter().any(|e| e.name == "b-roll.wav")),
         other => panic!("{other:?}"),
     }
+}
+
+/// Every file-type filter shares one read of a folder: going to a folder (all files), the panel's
+/// filtered view and the tree's expansion used to read it once each, each read holding one of the
+/// few reads a dead share may take.
+#[test]
+fn one_read_of_a_folder_serves_every_file_type() {
+    let fs = Arc::new(SlowFs { fs: FakeFs::new(), delay: std::time::Duration::ZERO, reads: Default::default() });
+    let s = Session::new(fs.clone());
+    let services = s.services.clone();
+    let ready = |l: media_browser::Listing| match l {
+        media_browser::Listing::Ready(v) => v.iter().map(|e| e.name.clone()).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    let all = ready(s.browser.io.read(&services, "/home/me/Movies", "all", std::time::Duration::from_secs(5)));
+    assert!(all.contains(&"b-roll.wav".to_string()) && all.contains(&"clip.mov".to_string()), "{all:?}");
+    assert_eq!(ready(s.browser.io.listing(&services, "/home/me/Movies", "audio")), ["Selects", "A-interview.wav", "b-roll.wav"]);
+    assert_eq!(ready(s.browser.io.listing(&services, "/home/me/Movies", "srt")), ["Selects", "subs.srt"]);
+    assert_eq!(fs.reads.load(std::sync::atomic::Ordering::Relaxed), 1, "one read for three filters");
+}
+
+/// A reader thread the OS refuses (resource limits, threads held by dead shares) used to leave the
+/// drives "being looked at" and the folder "being read" for the rest of the session, a read slot
+/// gone for good. Now the scan is tried again on the next call and the folder says it failed.
+#[test]
+fn a_refused_reader_thread_leaves_nothing_in_progress() {
+    let s = Session::new(Arc::new(SlowFs { fs: FakeFs::new(), delay: std::time::Duration::ZERO, reads: Default::default() }));
+    let services = s.services.clone();
+    crate::media_browser::tests_hook::REFUSE_THREADS.with(|r| r.set(true));
+    let (_, scanning) = s.browser.io.volumes(&services);
+    let listing = s.browser.io.listing(&services, "/home/me/Movies", "all");
+    crate::media_browser::tests_hook::REFUSE_THREADS.with(|r| r.set(false));
+    assert!(!scanning, "no scan is running");
+    assert!(matches!(listing, media_browser::Listing::Failed(_)), "{listing:?}");
+    // the failure stands until it is old, then the folder is read again
+    assert!(matches!(s.browser.io.listing(&services, "/home/me/Movies", "all"), media_browser::Listing::Failed(_)));
+    s.browser.io.expire();
+    let wait = std::time::Duration::from_secs(5);
+    assert!(matches!(s.browser.io.read(&services, "/home/me/Movies", "all", wait), media_browser::Listing::Ready(_)));
+    let (volumes, scanning) = s.browser.io.volumes(&services);
+    assert!(!scanning && !volumes.is_empty(), "{volumes:?}");
 }

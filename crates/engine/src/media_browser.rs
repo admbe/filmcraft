@@ -288,8 +288,9 @@ pub struct BrowserIo {
 struct IoState {
     volumes: Option<(web_time::Instant, Vec<Volume>)>,
     scanning: bool,
-    lists: std::collections::HashMap<(String, String), (web_time::Instant, Listing)>,
-    reading: std::collections::HashSet<(String, String)>,
+    /// By directory, unfiltered: every file-type filter shares one read of a folder.
+    lists: std::collections::HashMap<String, (web_time::Instant, Listing)>,
+    reading: std::collections::HashSet<String>,
 }
 
 impl BrowserIo {
@@ -317,12 +318,16 @@ impl BrowserIo {
         };
         if start {
             let inner = self.inner.clone();
-            run_off_thread("filmcraft-volumes", services.clone(), Self::WAIT, move |services| {
+            let started = run_off_thread("filmcraft-volumes", services.clone(), Self::WAIT, move |services| {
                 let v = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| services.volumes())).unwrap_or_default();
                 let mut st = inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 st.volumes = Some((web_time::Instant::now(), v));
                 st.scanning = false;
             });
+            if !started {
+                // no scan is going on: the next call tries again
+                self.state().scanning = false;
+            }
         }
         let st = self.state();
         (st.volumes.as_ref().map(|(_, v)| v.clone()).unwrap_or_default(), st.scanning)
@@ -359,7 +364,7 @@ impl BrowserIo {
     }
 
     fn list(&self, services: &std::sync::Arc<dyn Services>, dir: &str, filter: &str, wait: std::time::Duration, fresh: bool) -> Listing {
-        let key = (dir.to_string(), filter.to_string());
+        let key = dir.to_string();
         let start = {
             let mut st = self.state();
             let old = fresh || st.lists.get(&key).is_none_or(|(t, _)| t.elapsed() >= Self::LIST_FRESH);
@@ -371,8 +376,8 @@ impl BrowserIo {
         };
         if start {
             let (inner, k) = (self.inner.clone(), key.clone());
-            run_off_thread("filmcraft-media-browser", services.clone(), wait, move |services| {
-                let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list(&*services, &k.0, &k.1)));
+            let started = run_off_thread("filmcraft-media-browser", services.clone(), wait, move |services| {
+                let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list(&*services, &k, "all")));
                 let listing = match read {
                     Ok(Ok(v)) => Listing::Ready(std::sync::Arc::new(v)),
                     Ok(Err(e)) => Listing::Failed(e.to_string()),
@@ -385,31 +390,50 @@ impl BrowserIo {
                 st.reading.remove(&k);
                 st.lists.insert(k, (web_time::Instant::now(), listing));
             });
+            if !started {
+                // nothing is reading it: say so (read again once this is old) rather than pending forever
+                let mut st = self.state();
+                st.reading.remove(&key);
+                st.lists.insert(key.clone(), (web_time::Instant::now(), Listing::Failed("could not start a thread to read the folder".into())));
+            }
         }
         let st = self.state();
-        match st.lists.get(&key) {
+        let listing = match st.lists.get(&key) {
             // an older listing stands in while a fresh one is read, unless this read was asked for
             Some((at, l)) if !(fresh && start && st.reading.contains(&key) && at.elapsed() >= Self::LIST_FRESH) => l.clone(),
             Some(_) | None => Listing::Pending,
+        };
+        match listing {
+            Listing::Ready(v) if !matches!(filter, "" | "all") => {
+                Listing::Ready(std::sync::Arc::new(v.iter().filter(|e| e.is_dir || passes(filter, e.kind, &e.name)).cloned().collect()))
+            }
+            l => l,
         }
     }
 }
 
 /// Run `work` on a thread named `name` and wait up to `wait` for it (on the web, where there are
-/// no threads, run it now).
+/// no threads, run it now). False when the thread could not be started (the OS refused one): then
+/// `work` never runs, and the caller takes back what it marked as in progress.
 fn run_off_thread(
     name: &str,
     services: std::sync::Arc<dyn Services>,
     wait: std::time::Duration,
     work: impl FnOnce(std::sync::Arc<dyn Services>) + Send + 'static,
-) {
+) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (name, wait);
         work(services);
+        true
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        #[cfg(test)]
+        if tests_hook::REFUSE_THREADS.with(std::cell::Cell::get) {
+            log::warn!("{name}: thread not started: refused (test)");
+            return false;
+        }
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let spawned = std::thread::Builder::new().name(name.to_string()).spawn(move || {
             work(services);
@@ -418,9 +442,21 @@ fn run_off_thread(
         match spawned {
             Ok(_) => {
                 let _ = rx.recv_timeout(wait);
+                true
             }
-            Err(e) => log::warn!("{name}: thread not started: {e}"),
+            Err(e) => {
+                log::warn!("{name}: thread not started: {e}");
+                false
+            }
         }
+    }
+}
+
+/// Lets a test make [`run_off_thread`] fail as when the OS refuses a thread (on the test's own thread).
+#[cfg(test)]
+pub(crate) mod tests_hook {
+    thread_local! {
+        pub(crate) static REFUSE_THREADS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 }
 
