@@ -129,6 +129,30 @@ fn lut_folders_list_cube_and_3dl_files_grouped_by_subfolder() {
 }
 
 #[test]
+fn lut_folder_scan_reads_a_bounded_number_of_entries_per_folder() {
+    let base = std::env::temp_dir().join(format!("filmcraft-lut-budget-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (wide, nested, small) = (base.join("wide"), base.join("nested"), base.join("small"));
+    for (dir, n) in [(wide.clone(), 25), (nested.join("sub"), 25), (small.clone(), 1)] {
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..n {
+            std::fs::write(dir.join(format!("l{i:02}.cube")), "").unwrap();
+        }
+    }
+    let count = |luts: &[crate::color::FolderLut], dir: &std::path::Path| luts.iter().filter(|l| std::path::Path::new(&l.path).starts_with(dir)).count();
+    // each folder gets its own budget of 10 entries: 10 of the 25 files, the subfolder entry plus
+    // 9 files beneath it, and the next folder is still read
+    let luts = crate::color::scan_lut_folders_within(&[wide.clone(), nested.clone(), small.clone()], 10);
+    assert_eq!((count(&luts, &wide), count(&luts, &nested), count(&luts, &small)), (10, 9, 1));
+    // the real budget lists them all
+    let luts = crate::color::scan_lut_folders(&[wide.clone(), nested.clone(), small.clone()]);
+    assert_eq!((count(&luts, &wide), count(&luts, &nested), count(&luts, &small)), (25, 25, 1));
+    // no budget reads nothing
+    assert!(crate::color::scan_lut_folders_within(&[wide], 0).is_empty());
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
 fn export_builtin_and_library_luts() {
     let mut s = demo();
     for (fmt, ext) in [("cube", "cube"), ("3dl", "3dl")] {

@@ -137,6 +137,9 @@ pub struct FolderLut {
 /// stall the menu.
 const MAX_FOLDER_LUTS: usize = 2000;
 const MAX_FOLDER_DEPTH: usize = 4;
+/// At most this many directory entries are read under each LUT folder (LUTs or not, at every
+/// depth), so a folder of many other files is not read and sorted in full either.
+const MAX_FOLDER_ENTRIES: usize = 20_000;
 
 /// The LUT folders, in menu order: every entry of `FILMCRAFT_LUT_DIR` (a `PATH`-style list), then
 /// `LUTs` beside the executable, then `LUTs` in the data directory. Missing folders are fine.
@@ -158,20 +161,30 @@ pub fn lut_folders() -> Vec<std::path::PathBuf> {
 /// The LUT files under `folders`, sorted by group then name (case-insensitively). Hidden entries
 /// (a leading `.`) are skipped; unreadable folders are empty.
 pub fn scan_lut_folders(folders: &[std::path::PathBuf]) -> Vec<FolderLut> {
+    scan_lut_folders_within(folders, MAX_FOLDER_ENTRIES)
+}
+
+/// [`scan_lut_folders`] reading at most `entries` directory entries under each folder.
+pub(crate) fn scan_lut_folders_within(folders: &[std::path::PathBuf], entries: usize) -> Vec<FolderLut> {
     let mut out = Vec::new();
     for root in folders {
-        walk_lut_folder(root, root, 0, &mut out);
+        let mut budget = entries;
+        walk_lut_folder(root, root, 0, &mut budget, &mut out);
     }
     out.sort_by_cached_key(|l| (l.group.to_lowercase(), l.name.to_lowercase(), l.path.clone()));
     out
 }
 
-fn walk_lut_folder(root: &std::path::Path, dir: &std::path::Path, depth: usize, out: &mut Vec<FolderLut>) {
-    if depth > MAX_FOLDER_DEPTH || out.len() >= MAX_FOLDER_LUTS {
+/// `budget`: the directory entries still to read under `root`, shared by the whole walk.
+fn walk_lut_folder(root: &std::path::Path, dir: &std::path::Path, depth: usize, budget: &mut usize, out: &mut Vec<FolderLut>) {
+    if depth > MAX_FOLDER_DEPTH || out.len() >= MAX_FOLDER_LUTS || *budget == 0 {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut entries: Vec<_> = rd.flatten().collect();
+    // unreadable entries count too, so the read stops after `budget` entries whatever they are
+    let mut read = 0usize;
+    let mut entries: Vec<_> = rd.take(*budget).inspect(|_| read = read.saturating_add(1)).flatten().collect();
+    *budget = budget.saturating_sub(read);
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         if out.len() >= MAX_FOLDER_LUTS {
@@ -183,7 +196,7 @@ fn walk_lut_folder(root: &std::path::Path, dir: &std::path::Path, depth: usize, 
         }
         let path = e.path();
         if path.is_dir() {
-            walk_lut_folder(root, &path, depth.saturating_add(1), out);
+            walk_lut_folder(root, &path, depth.saturating_add(1), budget, out);
         } else if LutFormat::from_path(&name).is_some() {
             let group = match path.parent().and_then(|p| p.strip_prefix(root).ok()).filter(|r| !r.as_os_str().is_empty()) {
                 Some(rel) => rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect::<Vec<_>>().join(" / "),
