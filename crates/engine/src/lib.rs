@@ -736,7 +736,7 @@ impl Session {
             .unwrap_or_else(|_| Err(EngineError::Other(format!("internal error in `{id}` (see the crash log); the command did not complete"))));
         self.exec_depth -= 1;
         if self.exec_depth == 0 {
-            log_command(id, &params, &r, started.elapsed());
+            log_command(id, spec.journal, &params, &r, started.elapsed());
             source_monitor::track_history(self);
         }
         // source graphics: an edited instance updates the shared layers and the other instances
@@ -1242,14 +1242,41 @@ const SLOW_COMMAND_MS: u128 = 100;
 /// The app log tells the story of a session: what the user did (opening and saving projects,
 /// importing, sequences, exports, proxies, Source Settings) and every command slow enough to
 /// freeze the window. Other commands stay out of the log (drags execute many).
-fn log_command(id: &str, params: &Value, r: &Result<Value>, took: std::time::Duration) {
+/// Whether a command is logged when it ends, and how: `Some(true)` a warning (it was slow: the
+/// window did not respond meanwhile), `Some(false)` an info line (a notable command), `None` not
+/// at all.
+fn command_log_level(id: &str, journaled: bool, ms: u128) -> Option<bool> {
     const NOTABLE: [&str; 10] =
         ["file.", "sequence.open", "sequence.new", "export.", "proxy.", "clip.sourceSettings", "clip.interpretFootage", "project.", "playback.", "lut."];
-    let ms = took.as_millis();
-    let slow = ms >= SLOW_COMMAND_MS;
-    if !slow && !NOTABLE.iter().any(|n| id.starts_with(n)) {
-        return;
+    // Commands outside the journal that still act (they write or show something): the rest of
+    // them only read, and panels ask for some of those every frame (export.queue.list and
+    // file.recoveryList were 97% of a day's log in a field report). A slow one is still logged.
+    const ACTS: [&str; 5] = ["file.projectManager", "lut.export", "export.presets.export", "file.reveal", "file.mediaPropertiesFile"];
+    if ms >= SLOW_COMMAND_MS {
+        return Some(true);
     }
+    (NOTABLE.iter().any(|n| id.starts_with(n)) && (journaled || ACTS.contains(&id))).then_some(false)
+}
+
+#[cfg(test)]
+mod command_log_tests {
+    use super::command_log_level;
+
+    #[test]
+    fn read_only_queries_are_not_logged_unless_slow() {
+        assert_eq!(command_log_level("export.queue.list", false, 0), None, "asked every frame by the Export mode panel");
+        assert_eq!(command_log_level("file.recoveryList", false, 3), None);
+        assert_eq!(command_log_level("project.items", false, 1), None);
+        assert_eq!(command_log_level("export.queue.list", false, 900), Some(true), "a slow one still warns");
+        assert_eq!(command_log_level("file.open", true, 20), Some(false));
+        assert_eq!(command_log_level("file.projectManager", false, 20), Some(false), "acts, though not journaled");
+        assert_eq!(command_log_level("timeline.select", true, 2), None, "not notable");
+    }
+}
+
+fn log_command(id: &str, journaled: bool, params: &Value, r: &Result<Value>, took: std::time::Duration) {
+    let ms = took.as_millis();
+    let Some(slow) = command_log_level(id, journaled, ms) else { return };
     // a short summary of the parameters: how many paths or items, never their contents
     let mut what = String::new();
     for key in ["paths", "items"] {
