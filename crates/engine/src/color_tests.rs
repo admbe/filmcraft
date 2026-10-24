@@ -142,13 +142,13 @@ fn lut_folder_scan_reads_a_bounded_number_of_entries_per_folder() {
     let count = |luts: &[crate::color::FolderLut], dir: &std::path::Path| luts.iter().filter(|l| std::path::Path::new(&l.path).starts_with(dir)).count();
     // each folder gets its own budget of 10 entries: 10 of the 25 files, the subfolder entry plus
     // 9 files beneath it, and the next folder is still read
-    let luts = crate::color::scan_lut_folders_within(&[wide.clone(), nested.clone(), small.clone()], 10);
+    let luts = crate::color::scan_lut_folders_within(&[wide.clone(), nested.clone(), small.clone()], 10, 2000);
     assert_eq!((count(&luts, &wide), count(&luts, &nested), count(&luts, &small)), (10, 9, 1));
     // the real budget lists them all
     let luts = crate::color::scan_lut_folders(&[wide.clone(), nested.clone(), small.clone()]);
     assert_eq!((count(&luts, &wide), count(&luts, &nested), count(&luts, &small)), (25, 25, 1));
     // no budget reads nothing
-    assert!(crate::color::scan_lut_folders_within(&[wide], 0).is_empty());
+    assert!(crate::color::scan_lut_folders_within(&[wide], 0, 2000).is_empty());
     std::fs::remove_dir_all(&base).unwrap();
 }
 
@@ -170,6 +170,12 @@ fn lut_folders_list_each_file_once() {
     assert_eq!(names, ["x", "y", "z"], "{luts:?}");
     // y keeps its first listing, under A
     assert_eq!(luts.iter().find(|l| l.name == "y").map(|l| l.group.as_str()), Some("LUTs"));
+    // a repeat does not count toward the LUT limit: with the nested folder first, A adds only x
+    // and B's z still fits under a limit of 3
+    let luts = crate::color::scan_lut_folders_within(&[nested.clone(), a.clone(), b.clone()], 100, 3);
+    let mut names: Vec<&str> = luts.iter().map(|l| l.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["x", "y", "z"], "{luts:?}");
     std::fs::remove_dir_all(&base).unwrap();
 }
 
@@ -194,6 +200,17 @@ fn picking_a_copy_of_a_library_lut_records_its_path() {
     let n = s.history.undo.len();
     s.execute("lut.import", json!({"path": p2})).unwrap();
     assert_eq!(s.history.undo.len(), n);
+    // a failed assignment changes nothing: the path stays, no undo step, no new entry
+    let p3 = base.join("three.cube").to_string_lossy().to_string();
+    let p4 = base.join("four.cube").to_string_lossy().to_string();
+    std::fs::write(&p3, text).unwrap();
+    std::fs::write(&p4, text.replace("1 1 1", "0.5 0.5 0.5")).unwrap();
+    for path in [&p3, &p4] {
+        assert!(s.execute("lumetri.setInputLut", json!({"clip": 9_999_999, "path": path})).is_err());
+    }
+    assert_eq!(s.history.undo.len(), n);
+    assert_eq!(s.project.luts.len(), 1);
+    assert_eq!(s.project.luts[0].source_path.as_deref(), Some(p2.as_str()));
     std::fs::remove_dir_all(&base).unwrap();
 }
 

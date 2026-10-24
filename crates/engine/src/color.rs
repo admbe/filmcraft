@@ -174,36 +174,44 @@ pub fn lut_folders() -> Vec<std::path::PathBuf> {
 /// (a folder can also sit inside another). Hidden entries (a leading `.`) are skipped; unreadable
 /// folders are empty.
 pub fn scan_lut_folders(folders: &[std::path::PathBuf]) -> Vec<FolderLut> {
-    scan_lut_folders_within(folders, MAX_FOLDER_ENTRIES)
+    scan_lut_folders_within(folders, MAX_FOLDER_ENTRIES, MAX_FOLDER_LUTS)
 }
 
-/// [`scan_lut_folders`] reading at most `entries` directory entries under each folder.
-pub(crate) fn scan_lut_folders_within(folders: &[std::path::PathBuf], entries: usize) -> Vec<FolderLut> {
-    let mut out = Vec::new();
+/// [`scan_lut_folders`] reading at most `entries` directory entries under each folder and listing
+/// at most `luts` files.
+pub(crate) fn scan_lut_folders_within(folders: &[std::path::PathBuf], entries: usize, luts: usize) -> Vec<FolderLut> {
+    let mut w = LutWalk { budget: 0, max_luts: luts, out: Vec::new(), seen: std::collections::HashSet::new() };
     for root in folders {
-        let mut budget = entries;
-        walk_lut_folder(root, root, 0, &mut budget, &mut out);
+        w.budget = entries;
+        walk_lut_folder(root, root, 0, &mut w);
     }
-    // a file reached from two folders keeps its first listing
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|l| seen.insert(std::path::PathBuf::from(&l.path)));
+    let mut out = w.out;
     out.sort_by_cached_key(|l| (l.group.to_lowercase(), l.name.to_lowercase(), l.path.clone()));
     out
 }
 
-/// `budget`: the directory entries still to read under `root`, shared by the whole walk.
-fn walk_lut_folder(root: &std::path::Path, dir: &std::path::Path, depth: usize, budget: &mut usize, out: &mut Vec<FolderLut>) {
-    if depth > MAX_FOLDER_DEPTH || out.len() >= MAX_FOLDER_LUTS || *budget == 0 {
+/// A LUT folder scan: `budget` is the directory entries still to read under the current folder,
+/// `seen` the files listed so far (a file reached from two folders keeps its first listing and
+/// counts once toward `max_luts`).
+struct LutWalk {
+    budget: usize,
+    max_luts: usize,
+    out: Vec<FolderLut>,
+    seen: std::collections::HashSet<std::path::PathBuf>,
+}
+
+fn walk_lut_folder(root: &std::path::Path, dir: &std::path::Path, depth: usize, w: &mut LutWalk) {
+    if depth > MAX_FOLDER_DEPTH || w.out.len() >= w.max_luts || w.budget == 0 {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     // unreadable entries count too, so the read stops after `budget` entries whatever they are
     let mut read = 0usize;
-    let mut entries: Vec<_> = rd.take(*budget).inspect(|_| read = read.saturating_add(1)).flatten().collect();
-    *budget = budget.saturating_sub(read);
+    let mut entries: Vec<_> = rd.take(w.budget).inspect(|_| read = read.saturating_add(1)).flatten().collect();
+    w.budget = w.budget.saturating_sub(read);
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
-        if out.len() >= MAX_FOLDER_LUTS {
+        if w.out.len() >= w.max_luts {
             return;
         }
         let name = e.file_name().to_string_lossy().to_string();
@@ -212,14 +220,14 @@ fn walk_lut_folder(root: &std::path::Path, dir: &std::path::Path, depth: usize, 
         }
         let path = e.path();
         if path.is_dir() {
-            walk_lut_folder(root, &path, depth.saturating_add(1), budget, out);
-        } else if LutFormat::from_path(&name).is_some() {
+            walk_lut_folder(root, &path, depth.saturating_add(1), w);
+        } else if LutFormat::from_path(&name).is_some() && w.seen.insert(path.clone()) {
             let group = match path.parent().and_then(|p| p.strip_prefix(root).ok()).filter(|r| !r.as_os_str().is_empty()) {
                 Some(rel) => rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect::<Vec<_>>().join(" / "),
                 None => root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "LUTs".into()),
             };
             let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(name);
-            out.push(FolderLut { group, name: stem, path: path.to_string_lossy().to_string() });
+            w.out.push(FolderLut { group, name: stem, path: path.to_string_lossy().to_string() });
         }
     }
 }
@@ -330,6 +338,20 @@ pub(crate) fn set_lumetri_param(s: &mut Session, clip: ClipId, idx: usize, param
 }
 
 fn set_lut(s: &mut Session, p: &Value, param: &str) -> Result<Value> {
+    // a failed assignment (say, a bad `clip` after the path was imported) leaves the project and
+    // its history as they were
+    let n0 = s.history.undo.len();
+    let r = set_lut_inner(s, p, param);
+    if r.is_err() && s.history.undo.len() > n0 {
+        while s.history.undo.len() > n0 {
+            s.undo();
+        }
+        s.history.redo.clear();
+    }
+    r
+}
+
+fn set_lut_inner(s: &mut Session, p: &Value, param: &str) -> Result<Value> {
     let cmd = if param == "input_lut" { "lumetri.setInputLut" } else { "lumetri.setLook" };
     let r = match (str_p(p, "path"), str_p(p, "lut")) {
         (Some(path), _) => {
