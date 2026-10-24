@@ -656,6 +656,62 @@ pub fn import_bytes(s: &mut Session, path: &str, bytes: std::sync::Arc<[u8]>, bi
 
 /// Import a media file through the host's random-access reader ([`crate::Services::reader`]):
 /// only the container index is read now (web `Blob`s are never copied whole for containers).
+/// A media file opened ahead of its import: its source and identity, or why either failed.
+type Prefetched = Result<(filmcraft_media::SharedSource, filmcraft_project::MediaIdentity)>;
+
+/// Most media files opened at once by [`prefetch_sources`].
+const PREFETCH_THREADS: usize = 8;
+
+/// Open the streamed media files among `paths` concurrently (at most [`PREFETCH_THREADS`] at
+/// once), for [`import_prefetched`]. One path, or a build without threads, opens nothing ahead.
+fn prefetch_sources(s: &Session, paths: &[String]) -> std::collections::HashMap<String, Prefetched> {
+    let mut out = std::collections::HashMap::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let todo: Vec<&String> =
+            paths.iter().filter(|p| filmcraft_media::is_importable(std::path::Path::new(p.as_str())) && s.services.reader(p).is_some()).collect();
+        if todo.len() < 2 {
+            return out;
+        }
+        let (media, services) = (&*s.media, &*s.services);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let threads = PREFETCH_THREADS.min(std::thread::available_parallelism().map_or(2, |n| n.get())).min(todo.len()).max(1);
+        let results: Vec<Vec<(String, Prefetched)>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut mine = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(path) = todo.get(i) else { break };
+                            let one = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Prefetched {
+                                let identity = crate::relink::identity_of(services, path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+                                let src = media.open_file(path, services)?;
+                                Ok((src, identity))
+                            }))
+                            .unwrap_or_else(|_| Err(EngineError::Other(format!("{path}: internal error while opening (see the crash log)"))));
+                            mine.push(((*path).clone(), one));
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            workers.into_iter().filter_map(|w| w.join().ok()).collect()
+        });
+        out.extend(results.into_iter().flatten());
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = (s, paths);
+    out
+}
+
+/// [`import_streamed`] with the file already opened by [`prefetch_sources`].
+fn import_prefetched(s: &mut Session, path: &str, pre: Prefetched, bin: Option<filmcraft_project::BinId>) -> Result<ItemId> {
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+    let (src, identity) = pre?;
+    import_source(s, path, name, src, identity, bin)
+}
+
 pub fn import_streamed(s: &mut Session, path: &str, bin: Option<filmcraft_project::BinId>) -> Result<ItemId> {
     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let identity = crate::relink::identity_of(&*s.services, path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
@@ -1351,6 +1407,11 @@ fn build() -> Vec<CommandSpec> {
             // Settings ▸ Media ▸ Import image sequences on, a single numbered still is detected.
             let as_sequence = p.get("imageSequence").and_then(Value::as_bool).unwrap_or(false);
             let detect = !as_sequence && s.prefs.media.import_image_sequences && paths.len() == 1;
+            // Media files are opened (probed) several at a time before they are added in order:
+            // opening is the slow part (a slow decoder takes ~0.1 s to open a clip), and this
+            // command runs on the UI thread, so in a field report a card of 109 clips froze the
+            // window for 15 s.
+            let mut opened = if as_sequence { std::collections::HashMap::new() } else { prefetch_sources(s, &paths) };
             for path in paths {
                 if as_sequence || (detect && detect_image_sequence(s, &path)) {
                     match import_image_sequence(s, &path, bin) {
@@ -1366,7 +1427,10 @@ fn build() -> Vec<CommandSpec> {
                 let streamed = filmcraft_media::is_importable(std::path::Path::new(&path)) && s.services.reader(&path).is_some();
                 let read = if streamed { Ok(Vec::new()) } else { s.services.read_file(&path) };
                 match read {
-                    Ok(_) if streamed => match import_streamed(s, &path, bin) {
+                    Ok(_) if streamed => match match opened.remove(&path) {
+                        Some(pre) => import_prefetched(s, &path, pre, bin),
+                        None => import_streamed(s, &path, bin),
+                    } {
                         Ok(id) => ids.push(id.0),
                         Err(e) => errors.push(format!("{path}: {e}")),
                     },

@@ -1262,6 +1262,8 @@ mod gap_selection_tests;
 #[cfg(test)]
 mod image_sequence_tests;
 #[cfg(test)]
+mod import_batch_tests;
+#[cfg(test)]
 mod individual_selection_tests;
 #[cfg(test)]
 mod interchange_auto_points_tests;

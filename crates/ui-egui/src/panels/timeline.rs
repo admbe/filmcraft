@@ -1125,10 +1125,7 @@ fn request_sequence_peaks(app: &mut FilmcraftApp, item: ItemId) -> Option<Arc<Ve
         }
         pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|i| *i != pkey);
     };
-    #[cfg(not(target_arch = "wasm32"))]
-    std::thread::spawn(run);
-    #[cfg(target_arch = "wasm32")]
-    run();
+    waveforms::submit(Box::new(run));
     have
 }
 
@@ -1165,8 +1162,6 @@ pub(crate) fn request_peaks(app: &mut FilmcraftApp, item: ItemId, stream: usize)
     if let Some(p) = app.tl.peaks.lock().unwrap_or_else(|e| e.into_inner()).get(&pkey) {
         return Some(p.clone());
     }
-    // No source: try again on a later frame instead of leaving the item pending forever.
-    let src = app.session.source(item)?;
     {
         let mut pend = app.tl.peaks_pending.lock().unwrap_or_else(|e| e.into_inner());
         if pend.contains(&pkey) {
@@ -1176,17 +1171,98 @@ pub(crate) fn request_peaks(app: &mut FilmcraftApp, item: ItemId, stream: usize)
     }
     let peaks = app.tl.peaks.clone();
     let pending = app.tl.peaks_pending.clone();
-    let dur = src.info().duration;
+    // The source is opened on the waveform thread, never here: opening an unopened clip can start
+    // a decoder, and a timeline zoomed out over a hundred clips asked for every one of them in one
+    // frame (in a field report, 80 probes on the UI thread, the window frozen for seconds).
+    let provider = app.session.media.provider(app.session.project.clone(), app.session.services.clone());
     let run = move || {
-        let out = source_peaks(&*src, stream, dur);
-        peaks.lock().unwrap_or_else(|e| e.into_inner()).insert(pkey, Arc::new(out));
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            use filmcraft_render::SourceProvider;
+            let src = provider.source(item)?;
+            let dur = src.info().duration;
+            Some(source_peaks(&*src, stream, dur))
+        }));
+        // No source (or a failure): leave it unpending so a later frame asks again.
+        if let Ok(Some(out)) = out {
+            peaks.lock().unwrap_or_else(|e| e.into_inner()).insert(pkey, Arc::new(out));
+        }
         pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|i| *i != pkey);
     };
-    #[cfg(not(target_arch = "wasm32"))]
-    std::thread::spawn(run);
-    #[cfg(target_arch = "wasm32")]
-    run();
+    waveforms::submit(Box::new(run));
     None
+}
+
+/// Waveform work off the UI thread: a queue served by [`waveforms::THREADS`] named threads. Each
+/// waveform used to get a thread of its own, and each one opens that clip's audio decoder: a
+/// timeline of 104 clips ran 104 threads and 104 decoders at once (a field report). Now at most
+/// this many clips are read at a time; the rest wait in order. On the web there are no threads: the job runs at once.
+pub(crate) mod waveforms {
+    use std::collections::VecDeque;
+    use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
+
+    /// Waveforms computed at once.
+    pub const THREADS: usize = 2;
+
+    type Job = Box<dyn FnOnce() + Send>;
+
+    struct Queue {
+        jobs: Mutex<VecDeque<Job>>,
+        ready: Condvar,
+    }
+
+    fn queue() -> &'static Queue {
+        static QUEUE: OnceLock<Queue> = OnceLock::new();
+        QUEUE.get_or_init(|| {
+            let q = Queue { jobs: Mutex::new(VecDeque::new()), ready: Condvar::new() };
+            #[cfg(not(target_arch = "wasm32"))]
+            for i in 0..THREADS {
+                let spawned = std::thread::Builder::new().name(format!("filmcraft-waveform-{i}")).spawn(serve);
+                if let Err(e) = spawned {
+                    log::warn!("waveform thread {i} not started: {e}");
+                }
+            }
+            q
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn serve() {
+        let q = queue();
+        loop {
+            let job = {
+                let mut jobs = q.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+                loop {
+                    if let Some(job) = jobs.pop_front() {
+                        break job;
+                    }
+                    jobs = q.ready.wait(jobs).unwrap_or_else(PoisonError::into_inner);
+                }
+            };
+            // a panicking waveform must not take a pool thread with it
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                log::warn!("a waveform job panicked; the waveform stays empty");
+            }
+        }
+    }
+
+    /// Queue `job` (desktop) or run it now (web).
+    pub fn submit(job: Job) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            job();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let q = queue();
+            q.jobs.lock().unwrap_or_else(PoisonError::into_inner).push_back(job);
+            q.ready.notify_one();
+        }
+    }
+
+    /// Jobs waiting (not counting those running).
+    pub fn queued() -> usize {
+        queue().jobs.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
 }
 
 /// 45° hatching over `r` (transitions, and the empty end of a nested sequence clip).
@@ -3459,5 +3535,79 @@ mod ruler_tests {
         }
         let (minor, label) = ruler_steps(1.0, i64::MAX);
         assert!(minor >= 1 && label >= 1 && label % minor == 0, "an unrepresentable rate: tick {minor}, label {label}");
+    }
+}
+
+#[cfg(test)]
+mod waveform_pool_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Occupy every waveform thread until the returned sender is dropped.
+    fn block_pool() -> mpsc::Sender<()> {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let (started_tx, started_rx) = mpsc::channel();
+        for _ in 0..waveforms::THREADS {
+            let (rx, started) = (release_rx.clone(), started_tx.clone());
+            waveforms::submit(Box::new(move || {
+                let _ = started.send(());
+                // wait for the release (the sender dropped), with a bound so a failure cannot hang
+                let _ = rx.lock().unwrap_or_else(|e| e.into_inner()).recv_timeout(Duration::from_secs(30));
+            }));
+        }
+        for _ in 0..waveforms::THREADS {
+            started_rx.recv_timeout(Duration::from_secs(30)).expect("a waveform thread runs the blocker");
+        }
+        release_tx
+    }
+
+    #[test]
+    fn waveforms_run_a_few_at_a_time_however_many_are_asked_for() {
+        // Regression: a thread per waveform, 104 at once for a 104-clip timeline.
+        let (running, peak, done) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let n = 12;
+        for _ in 0..n {
+            let (running, peak, done) = (running.clone(), peak.clone(), done.clone());
+            waveforms::submit(Box::new(move || {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(30));
+                running.fetch_sub(1, Ordering::SeqCst);
+                done.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        let started = std::time::Instant::now();
+        while done.load(Ordering::SeqCst) < n && started.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(done.load(Ordering::SeqCst), n, "every waveform job ran");
+        assert!(peak.load(Ordering::SeqCst) <= waveforms::THREADS, "at most {} at once, saw {}", waveforms::THREADS, peak.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn asking_for_a_waveform_never_opens_the_source_on_the_calling_thread() {
+        // Regression: the timeline's paint opened every clip's source on the UI thread to read
+        // its duration (80 probes in one session, the window frozen).
+        let mut s = filmcraft_engine::Session::default();
+        s.execute("file.openDemoProject", serde_json::json!({})).unwrap();
+        let mut app = FilmcraftApp::new(s);
+        let seq = app.session.active_sequence().unwrap().clone();
+        let item = seq.audio_tracks.iter().flat_map(|t| t.items.iter()).map(|it| it.item).next().expect("an audio clip");
+        // as for a project just opened: the clip's source is not open yet
+        app.session.media.remove(item);
+        assert!(app.session.media.cached(item).is_none());
+        let release = block_pool();
+        assert!(request_peaks(&mut app, item, 0).is_none(), "nothing computed yet");
+        assert!(app.session.media.cached(item).is_none(), "the source was opened by the caller, not the waveform thread");
+        drop(release);
+        let started = std::time::Instant::now();
+        while request_peaks(&mut app, item, 0).is_none() && started.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(request_peaks(&mut app, item, 0).is_some(), "the waveform arrives from the pool");
+        assert!(app.session.media.cached(item).is_some(), "and the pool opened the source");
     }
 }
