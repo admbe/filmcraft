@@ -471,7 +471,7 @@ fn paused_meters_repaint_without_input_and_settle_after_release() {
         d.frames(10);
         let prefix = if workspace == "Audio" { "mixer.Mix.meter" } else { "audioMeters.channel." };
         let labels = |elements: &Value| elements.as_array().unwrap().iter().map(|e| e["label"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-        // Without an audio device (CI, k1) the meters are fed by the loudness readout's mix, which
+        // Without an audio device (CI, headless machines) the meters are fed by the loudness readout's mix, which
         // runs on a thread of its own: give it the moment it takes (a few milliseconds a block).
         let mut active = labels(&d.ok("ui.elements", json!({"prefix": prefix})));
         let started = std::time::Instant::now();

@@ -10,10 +10,10 @@ use crate::theme::Tokens;
 ///
 /// The meter is fed exactly the programme audio played since the last feed (consecutive,
 /// non-overlapping blocks, so gating and integration are correct); a seek resets it. Measuring
-/// means mixing that audio again, and until 2026-10-21 the mix ran on the UI thread every frame:
-/// with R3D clips it waited on the RED helper for their sound, and frames of 0.3-4.5 s followed
-/// one another for as long as playback ran. The mix now runs on a worker thread, one block at a
-/// time; while one is mixing the next block just grows, and the readout shows the last values.
+/// means mixing that audio again, and the mix used to run on the UI thread every frame: with a
+/// slow source it waited for the sound, and frames of 0.3-4.5 s followed one another for as long
+/// as playback ran. The mix now runs on a worker thread, one block at a time; while one is mixing
+/// the next block just grows, and the readout shows the last values.
 #[derive(Default)]
 pub(crate) struct LoudnessFeed {
     /// The meter, as far as it has been fed (the worker writes it).
@@ -334,7 +334,7 @@ mod tests {
         .clear();
     }
 
-    /// A source whose sound takes `delay` per read (an R3D clip whose RED helper is busy).
+    /// A source whose sound takes `delay` per read (a slow or busy decoder).
     struct SlowSound(filmcraft_media::SharedSource, std::time::Duration);
 
     impl filmcraft_media::MediaSource for SlowSound {
@@ -354,8 +354,8 @@ mod tests {
         }
     }
 
-    /// 2026-10-21: the loudness readout mixed the programme on the UI thread every frame of
-    /// playback; with R3D clips each mix waited on the RED helper and the frames took 0.3-4.5 s.
+    /// A field report: the loudness readout mixed the programme on the UI thread every frame of
+    /// playback; with a slow source each mix waited for its sound and the frames took 0.3-4.5 s.
     #[test]
     fn feeding_the_loudness_meter_never_waits_for_the_mix() {
         let mut s = filmcraft_engine::Session::default();
