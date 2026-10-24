@@ -172,6 +172,10 @@ pub struct FrameDelivery {
     /// decoder process answering several requests at once knows its own throughput). `None`:
     /// unknown; playback measures what it gets.
     pub rate: Option<f64>,
+    /// `rate` was measured within the last couple of seconds. A source that measures itself at
+    /// saturation keeps its last reading through a lull, and a sparse playback plan is a lull:
+    /// playback may then try for more than a stale reading allows.
+    pub fresh: bool,
 }
 
 pub trait MediaSource: Send + Sync {
