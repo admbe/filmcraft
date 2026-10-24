@@ -8,6 +8,7 @@
 //! import, whose result lists every item.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use filmcraft_project::{BinId, ItemId};
@@ -27,6 +28,16 @@ pub struct Pending {
     items: Vec<ItemId>,
     errors: Vec<String>,
     started: web_time::Instant,
+    /// The job's progress (its cancel flag) and result: once the result is set, the worker has
+    /// ended and nothing more arrives in `opened`.
+    progress: Arc<filmcraft_export::Progress>,
+    result: Arc<Mutex<Option<std::result::Result<filmcraft_export::Report, String>>>>,
+}
+
+impl Pending {
+    fn ended(&self) -> bool {
+        self.result.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
 }
 
 /// Start opening `paths` on a background thread for an import into `bin`; returns the job id
@@ -40,21 +51,21 @@ pub(crate) fn start(s: &mut Session, paths: Vec<String>, bin: Option<BinId>) -> 
         progress: Default::default(),
         result: Default::default(),
     };
-    job.progress.total.store(n as u64, std::sync::atomic::Ordering::Relaxed);
+    job.progress.total.store(n as u64, Ordering::Relaxed);
     let opened: Arc<Mutex<HashMap<String, Prefetched>>> = Arc::default();
     let (progress, result, sink) = (job.progress.clone(), job.result.clone(), opened.clone());
     let (media, services, todo) = (s.media.clone(), s.services.clone(), paths.clone());
     let run = move || {
         let t0 = web_time::Instant::now();
-        open_concurrently(&media, &*services, &todo, &|path: &str, r: Prefetched| {
+        open_concurrently(&media, &*services, &todo, Some(&progress.cancel), &|path: &str, r: Prefetched| {
             sink.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_string(), r);
-            progress.done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            progress.done.fetch_add(1, Ordering::Relaxed);
             *progress.status.lock().unwrap_or_else(|e| e.into_inner()) =
                 std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         });
         let secs = t0.elapsed().as_secs_f64();
         *progress.status.lock().unwrap_or_else(|e| e.into_inner()) = format!("Opened in {secs:.1}s");
-        progress.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+        progress.finished.store(true, Ordering::Relaxed);
         *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ok(filmcraft_export::Report {
             path: String::new(),
             frames: todo.len() as u64,
@@ -65,10 +76,31 @@ pub(crate) fn start(s: &mut Session, paths: Vec<String>, bin: Option<BinId>) -> 
         }));
     };
     let run = crate::export_tools::guard_job(job.progress.clone(), job.result.clone(), run);
-    s.jobs.push(job);
-    s.background_imports.push(Pending { job: id, bin, paths, next: 0, opened, items: Vec::new(), errors: Vec::new(), started: web_time::Instant::now() });
+    // recorded once the thread runs: a thread that could not start leaves no job "running" forever
     std::thread::Builder::new().name("filmcraft-import".into()).spawn(run).map_err(|e| EngineError::Other(format!("import thread: {e}")))?;
+    let (progress, result) = (job.progress.clone(), job.result.clone());
+    s.jobs.push(job);
+    s.background_imports.push(Pending {
+        job: id,
+        bin,
+        paths,
+        next: 0,
+        opened,
+        items: Vec::new(),
+        errors: Vec::new(),
+        started: web_time::Instant::now(),
+        progress,
+        result,
+    });
     Ok(id)
+}
+
+/// Stop the background imports (the project is being replaced): what they have not added yet is
+/// never added, to this project or the next one.
+pub(crate) fn cancel_all(s: &mut Session) {
+    for p in s.background_imports.drain(..) {
+        p.progress.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Add what the background imports have opened, in order, and finish those that are done (call
@@ -77,17 +109,29 @@ pub fn poll(s: &mut Session) {
     let mut i = 0;
     while i < s.background_imports.len() {
         // take the results that are next in order, then add them without the lock
+        let mut not_opened = 0;
         let ready: Vec<(String, Prefetched)> = {
             let pending = &mut s.background_imports[i];
+            // read before the results: once the worker has ended every result it made is in
+            // `opened`, and a path still missing never comes (cancelled, or a worker that died)
+            let ended = pending.ended();
             let mut opened = pending.opened.lock().unwrap_or_else(|e| e.into_inner());
             let mut ready = Vec::new();
             while let Some(path) = pending.paths.get(pending.next) {
-                let Some(r) = opened.remove(path) else { break };
-                ready.push((path.clone(), r));
+                match opened.remove(path) {
+                    Some(r) => ready.push((path.clone(), r)),
+                    None if ended => not_opened += 1,
+                    None => break,
+                }
                 pending.next += 1;
             }
             ready
         };
+        if not_opened > 0 {
+            let p = &mut s.background_imports[i];
+            let why = if p.progress.cancel.load(Ordering::Relaxed) { "the import was cancelled" } else { "the import stopped" };
+            p.errors.push(format!("{not_opened} of {} files not imported: {why}", p.paths.len()));
+        }
         let bin = s.background_imports[i].bin;
         for (path, r) in ready {
             match import_prefetched(s, &path, r, bin) {
@@ -121,3 +165,7 @@ fn finish(s: &mut Session, done: Pending) {
 pub(crate) fn describe(job: u64, pending: usize) -> Value {
     json!({ "importJob": job, "pending": pending })
 }
+
+#[cfg(test)]
+#[path = "background_import_tests.rs"]
+mod tests;

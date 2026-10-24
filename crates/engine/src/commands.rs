@@ -665,12 +665,13 @@ const PREFETCH_THREADS: usize = 8;
 
 /// Open `paths` (streamed media files) several at a time, at most [`PREFETCH_THREADS`], handing
 /// each one's source and identity, or its error, to `done` as it finishes. Each open runs under
-/// `catch_unwind`.
+/// `catch_unwind`. Once `cancel` is set no further file is opened.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn open_concurrently(
     media: &crate::media_pool::MediaPool,
     services: &dyn crate::Services,
     paths: &[String],
+    cancel: Option<&std::sync::atomic::AtomicBool>,
     done: &(dyn Fn(&str, Prefetched) + Sync),
 ) {
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -678,7 +679,7 @@ pub(crate) fn open_concurrently(
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
-                loop {
+                while !cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(path) = paths.get(i) else { break };
                     let one = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Prefetched {
@@ -699,9 +700,13 @@ pub(crate) fn open_concurrently(
     media: &crate::media_pool::MediaPool,
     services: &dyn crate::Services,
     paths: &[String],
+    cancel: Option<&std::sync::atomic::AtomicBool>,
     done: &(dyn Fn(&str, Prefetched) + Sync),
 ) {
     for path in paths {
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            break;
+        }
         let one = crate::relink::identity_of(services, path)
             .map_err(|e| EngineError::Other(format!("{path}: {e}")))
             .and_then(|identity| media.open_file(path, services).map(|src| (src, identity)).map_err(EngineError::from));
@@ -722,7 +727,7 @@ fn prefetch_sources(s: &Session, paths: &[String]) -> std::collections::HashMap<
         return std::collections::HashMap::new();
     }
     let out = std::sync::Mutex::new(std::collections::HashMap::new());
-    open_concurrently(&s.media, &*s.services, &todo, &|path: &str, r: Prefetched| {
+    open_concurrently(&s.media, &*s.services, &todo, None, &|path: &str, r: Prefetched| {
         out.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_string(), r);
     });
     out.into_inner().unwrap_or_else(|e| e.into_inner())
@@ -1410,6 +1415,7 @@ fn build() -> Vec<CommandSpec> {
         // ================= File =================
         cmd!("file.newProject", "Project…", ["File", "New"], Some("Cmd+Alt+N"), r#"{"name":str}"#, always, |s, p| {
             let name = str_p(p, "name").unwrap_or("Untitled").to_string();
+            crate::background_import::cancel_all(s);
             s.project = std::sync::Arc::new(filmcraft_project::Project::new(&name));
             s.history = Default::default();
             s.history.limit = 200;
@@ -1424,6 +1430,7 @@ fn build() -> Vec<CommandSpec> {
         }),
         cmd!("file.openDemoProject", "Demo Project", ["File", "New"], None, "{}", always, |s, _| {
             let (p, seq) = crate::demo::demo_project(&s.media);
+            crate::background_import::cancel_all(s);
             s.project = std::sync::Arc::new(p);
             s.history = Default::default();
             s.history.limit = 200;
@@ -4680,6 +4687,8 @@ fn schema_backup_path(path: &str, schema: u32) -> String {
 
 /// Make `proj` the session's project (fresh history, media pool and editor state).
 fn install_project(s: &mut Session, proj: filmcraft_project::Project, path: Option<String>, clean: bool) {
+    // an import still opening files belongs to the project being replaced
+    crate::background_import::cancel_all(s);
     let proxies = s.media.use_proxies();
     s.media = std::sync::Arc::new(crate::MediaPool::default());
     s.media.set_use_proxies(proxies);

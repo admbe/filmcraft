@@ -142,6 +142,23 @@ fn still_dropped_on_the_video_row_is_placed_at_the_pointer() {
     assert_eq!(clip_counts(&h), (1, 0), "status: {}", h.state().ui.status);
 }
 
+/// A numbered still with Settings ▸ Media ▸ Import image sequences on is imported at once (as the
+/// image sequence it starts), not in the background. The drop used to wait only for a background
+/// import, so this file went to the bin and never reached the Timeline.
+#[test]
+fn a_file_the_drop_imports_at_once_is_placed_too() {
+    let mut h = harness();
+    h.state_mut().session.prefs.media.import_image_sequences = true;
+    let dir = fixture("drop_sequence");
+    std::fs::create_dir_all(&dir).unwrap();
+    for n in 1..=3 {
+        image::RgbaImage::from_pixel(64, 36, image::Rgba([40, 140, 220, 255])).save(dir.join(format!("frame.{n:04}.png"))).unwrap();
+    }
+    drop_on_row(&mut h, "timeline.track.V1.target", &dir.join("frame.0001.png"));
+    assert!(h.state().session.background_imports.is_empty());
+    assert_eq!(clip_counts(&h), (1, 0), "the sequence is on the timeline; status: {}", h.state().ui.status);
+}
+
 #[test]
 fn still_dropped_on_an_audio_row_goes_to_the_video_track_without_error() {
     // a video-only item over an audio row: the picture takes the matching video track, no error

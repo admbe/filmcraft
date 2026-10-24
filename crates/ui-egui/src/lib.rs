@@ -367,9 +367,9 @@ pub struct FilmcraftApp {
     /// Items imported by an OS file drop, to place on the Timeline at the drop point this frame.
     pending_timeline_drop: Option<(Vec<filmcraft_engine::project::ItemId>, egui::Pos2)>,
     /// Files dropped from the OS with "drop imports to the timeline": the background import's
-    /// job and the drop point. When the import finishes its items become
-    /// [`Self::pending_timeline_drop`] for the Timeline to place.
-    drop_import: Option<(u64, egui::Pos2)>,
+    /// job, the drop point and the items the drop imported at once. When the import finishes
+    /// those items and its own become [`Self::pending_timeline_drop`] for the Timeline to place.
+    drop_import: Option<(u64, egui::Pos2, Vec<filmcraft_engine::project::ItemId>)>,
     /// Files being dragged over the window from the OS (count, pointer): the Timeline previews where they would land.
     file_drag_hover: Option<(usize, egui::Pos2)>,
     timeline_view_last: Option<filmcraft_engine::project::SequenceView>,
@@ -1502,8 +1502,14 @@ impl FilmcraftApp {
             let imported = self.session.execute("file.import", json!({"paths": paths, "bin": self.import_bin().0, "async": true}));
             match imported {
                 Ok(v) if self.session.prefs.timeline.drop_import_to_timeline => {
-                    if let (Some(pos), Some(job)) = (pointer, v["importJob"].as_u64()) {
-                        self.drop_import = Some((job, pos));
+                    // some files import at once (a detected image sequence, a file without a
+                    // streamed reader, every file on the web): placed now, or with the rest
+                    let now: Vec<filmcraft_engine::project::ItemId> =
+                        v["items"].as_array().map(|a| a.iter().filter_map(|i| i.as_u64()).map(filmcraft_engine::project::ItemId).collect()).unwrap_or_default();
+                    match (pointer, v["importJob"].as_u64()) {
+                        (Some(pos), Some(job)) => self.drop_import = Some((job, pos, now)),
+                        (Some(pos), None) if !now.is_empty() => self.pending_timeline_drop = Some((now, pos)),
+                        _ => {}
                     }
                 }
                 Ok(_) => {}
@@ -1847,12 +1853,12 @@ impl FilmcraftApp {
                 }
                 filmcraft_engine::Event::RevealInProject(item) => self.reveal_in_project(item),
                 filmcraft_engine::Event::ImportFinished { job, items } => {
-                    if let Some((want, pos)) = self.drop_import
-                        && want == job
+                    if self.drop_import.as_ref().is_some_and(|d| d.0 == job)
+                        && let Some((_, pos, mut placed)) = self.drop_import.take()
                     {
-                        self.drop_import = None;
-                        if !items.is_empty() {
-                            self.pending_timeline_drop = Some((items, pos));
+                        placed.extend(items);
+                        if !placed.is_empty() {
+                            self.pending_timeline_drop = Some((placed, pos));
                         }
                     }
                 }
@@ -1968,7 +1974,7 @@ impl FilmcraftApp {
         let p = ui.painter();
         p.rect_filled(bar, 3.0, t.separator);
         p.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * f, bar.height())), 3.0, t.accent);
-        let verb = if job.label.starts_with("Rendering") { crate::i18n::t(&job.label).to_string() } else { tl!("Exporting").to_string() };
+        let verb = job_verb(&job.label);
         p.text(
             egui::pos2(bar.min.x - 8.0, sb.center().y),
             egui::Align2::RIGHT_CENTER,
@@ -2341,6 +2347,28 @@ fn clipboard_events_as_keys(events: &mut Vec<egui::Event>, modifiers: egui::Modi
         })
         .collect();
     events.extend(keys.into_iter().map(|key| Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers }));
+}
+
+/// The status bar's word for a running job, from its label.
+fn job_verb(label: &str) -> String {
+    if label.starts_with("Rendering") {
+        crate::i18n::t(label).to_string()
+    } else if label.starts_with("Import ") {
+        tl!("Importing").to_string()
+    } else {
+        tl!("Exporting").to_string()
+    }
+}
+
+#[cfg(test)]
+mod job_verb_tests {
+    #[test]
+    fn a_background_import_is_importing_not_exporting() {
+        assert_eq!(super::job_verb("Import 353 files"), "Importing");
+        assert_eq!(super::job_verb("Import 1 file"), "Importing");
+        assert_eq!(super::job_verb("Rendering 3 preview segments"), "Rendering 3 preview segments");
+        assert_eq!(super::job_verb("Export clip.mp4"), "Exporting");
+    }
 }
 
 #[cfg(test)]

@@ -767,6 +767,12 @@ fn media_browser_navigation_import_and_columns() {
     d.ok("ui.scroll", json!({"id": "panel.menu.scroll", "dy": -1200}));
     d.frames(4);
     d.click("mediaBrowser.menu.import");
+    // the panel's import opens its files in the background; the frames add them
+    let started = std::time::Instant::now();
+    while !d.app().session.background_imports.is_empty() && started.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        d.frames(1);
+    }
     assert_eq!(d.app().session.project.items.len(), 2);
     // Shift+O opens the selection in the Source monitor (already imported: no duplicate)
     d.click("mediaBrowser.entry.b-roll.wav");
