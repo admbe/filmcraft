@@ -768,7 +768,6 @@ impl Session {
             .unwrap_or_else(|_| Err(EngineError::Other(format!("internal error in `{id}` (see the crash log); the command did not complete"))));
         self.exec_depth -= 1;
         if self.exec_depth == 0 {
-            log_command(id, spec.journal, &params, &r, started.elapsed());
             source_monitor::track_history(self);
         }
         // source graphics: an edited instance updates the shared layers and the other instances
@@ -783,6 +782,10 @@ impl Session {
         self.sync_persistence();
         // playback reads the newest snapshot (mixer moves, mutes… are heard while playing)
         self.previews.live.publish_project(self.project.clone());
+        // logged with the follow-up work above: the caller waited for that too
+        if self.exec_depth == 0 {
+            log_command(id, spec.journal, &params, &r, started.elapsed());
+        }
         if r.is_ok() && spec.journal {
             self.journal.push((id.to_string(), params));
             if self.journal.len() > 10_000 {

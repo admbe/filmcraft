@@ -187,9 +187,13 @@ fn crash_recovery_end_to_end() {
     assert_eq!(list[0]["cleanExit"], false);
     assert_eq!(list[0]["savedAt"].as_str().unwrap().len(), 19);
     let old_dir = c.recovery_candidates()[0].dir.clone();
-    let t = std::time::Instant::now();
+    // The worker is held: a recovery that waited for it (File > Recover did, 1.3 s on the UI
+    // thread) would never return before the release, nor could the old journal be gone.
+    let release = c.persistence.as_ref().unwrap().hold_worker();
     c.execute("file.recover", json!({})).unwrap();
-    assert!(t.elapsed() < std::time::Duration::from_secs(1), "the journal is written meanwhile, not waited for: {:?}", t.elapsed());
+    assert!(old_dir.join("snapshot.fcproj").exists(), "the old journal stays until ours is written");
+    assert_ne!(journaled(&mut c), c.revision, "the journal is written meanwhile, not waited for");
+    drop(release);
     assert_eq!(*c.project, edited);
     assert!(c.is_dirty(), "recovered changes are unsaved");
     assert_eq!(c.path.as_deref(), Some(proj.as_str()));

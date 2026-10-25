@@ -711,6 +711,10 @@ enum Msg {
     /// Write any pending journal, then delete this folder (a recovered session's old journal:
     /// ours must hold the recovered state before the old one goes).
     FlushThenRemove(PathBuf),
+    /// Tests: the worker waits until this is answered (or dropped), so a test can show what is
+    /// done without it.
+    #[cfg(test)]
+    Hold(Receiver<()>),
     Stop,
 }
 
@@ -844,6 +848,14 @@ impl Persistence {
 
     /// Delete `dir` once any pending journal is written, without waiting for either (the
     /// worker does them in order). File ▸ Recover waited for both on the UI thread (1.3 s).
+    /// Tests: hold the worker (it handles nothing else) until the returned sender is dropped.
+    #[cfg(test)]
+    pub(crate) fn hold_worker(&self) -> Sender<()> {
+        let (release, held) = channel();
+        let _ = self.tx.send(Msg::Hold(held));
+        release
+    }
+
     pub fn remove_after_journal(&self, dir: PathBuf) {
         if let Err(e) = self.tx.send(Msg::FlushThenRemove(dir)) {
             log::warn!("auto-save worker stopped; the old journal stays: {e}");
@@ -1037,6 +1049,10 @@ impl Worker {
                     if !self.remove_once_journaled.is_empty() {
                         log::info!("recovered session's old journal kept until the recovered changes are journaled or saved");
                     }
+                }
+                #[cfg(test)]
+                Some(Msg::Hold(held)) => {
+                    let _ = held.recv();
                 }
                 Some(Msg::Stop) => return,
                 None => {}
