@@ -3617,7 +3617,7 @@
 	Blend Bias	混合偏向
 	Blend Type	混合类型
 	Camera RAW	相机 RAW
-	Camera RAW clips develop with these settings unless they have settings of their own (Clip ▸ Source Settings ▸ Decode Using ▸ Clip).	相机 RAW 剪辑使用这些设置显影，除非它们有自己的设置（剪辑 ▸ 源设置 ▸ 解码依据 ▸ 剪辑）。
+	Camera RAW clips develop with these settings unless they have settings of their own (Clip > Source Settings > Decode Using > Clip).	相机 RAW 剪辑使用这些设置显影，除非它们有自己的设置（剪辑 > 源设置 > 解码依据 > 剪辑）。
 	Camera RAW…	相机 RAW…
 	Camera Raw	相机 RAW
 	Chroma Noise Reduction	色度降噪
@@ -3662,7 +3662,7 @@
 	The linear output carries no look: choose a display or log gamma curve to apply it.	线性输出不带外观：请选择显示或对数伽马曲线以应用它。
 	The luma and RGB curves the clip records.	剪辑记录的亮度和 RGB 曲线。
 	This clip carries no creative LUT.	此剪辑不带创意 LUT。
-	This clip decodes with the project's Camera RAW settings (File ▸ Project Settings ▸ Camera RAW). Choose Decode Using ▸ Clip to give it settings of its own.	此剪辑使用项目的相机 RAW 设置解码（文件 ▸ 项目设置 ▸ 相机 RAW）。选择 解码依据 ▸ 剪辑 可为其指定自己的设置。
+	This clip decodes with the project's Camera RAW settings (File > Project Settings > Camera RAW). Choose Decode Using > Clip to give it settings of its own.	此剪辑使用项目的相机 RAW 设置解码（文件 > 项目设置 > 相机 RAW）。选择 解码依据 > 剪辑 可为其指定自己的设置。
 	This clip has no HDRx track (Nikon R3D NE records none): there is nothing to blend.	此剪辑没有 HDRx 轨道（Nikon R3D NE 不记录）：没有可混合的内容。
 	Update RMD	更新 RMD
 	Use Changes	使用更改

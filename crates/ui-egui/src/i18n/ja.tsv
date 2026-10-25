@@ -3641,7 +3641,7 @@
 	Blend Bias	ブレンドバイアス
 	Blend Type	ブレンドの種類
 	Camera RAW	カメラ RAW
-	Camera RAW clips develop with these settings unless they have settings of their own (Clip ▸ Source Settings ▸ Decode Using ▸ Clip).	カメラ RAW クリップは、独自の設定がない限りこの設定で現像されます（クリップ ▸ ソース設定 ▸ デコードに使用 ▸ クリップ）。
+	Camera RAW clips develop with these settings unless they have settings of their own (Clip > Source Settings > Decode Using > Clip).	カメラ RAW クリップは、独自の設定がない限りこの設定で現像されます（クリップ > ソース設定 > デコードに使用 > クリップ）。
 	Camera RAW…	カメラ RAW…
 	Camera Raw	カメラ RAW
 	Chroma Noise Reduction	色ノイズ低減
@@ -3686,7 +3686,7 @@
 	The linear output carries no look: choose a display or log gamma curve to apply it.	リニア出力にはルックが含まれません。適用するには表示用またはログのガンマカーブを選んでください。
 	The luma and RGB curves the clip records.	クリップに記録された輝度と RGB のカーブ。
 	This clip carries no creative LUT.	このクリップにはクリエイティブ LUT がありません。
-	This clip decodes with the project's Camera RAW settings (File ▸ Project Settings ▸ Camera RAW). Choose Decode Using ▸ Clip to give it settings of its own.	このクリップはプロジェクトのカメラ RAW 設定でデコードされます（ファイル ▸ プロジェクト設定 ▸ カメラ RAW）。独自の設定にするには、デコードに使用 ▸ クリップを選んでください。
+	This clip decodes with the project's Camera RAW settings (File > Project Settings > Camera RAW). Choose Decode Using > Clip to give it settings of its own.	このクリップはプロジェクトのカメラ RAW 設定でデコードされます（ファイル > プロジェクト設定 > カメラ RAW）。独自の設定にするには、デコードに使用 > クリップを選んでください。
 	This clip has no HDRx track (Nikon R3D NE records none): there is nothing to blend.	このクリップには HDRx トラックがありません（Nikon R3D NE は記録しません）。ブレンドするものはありません。
 	Update RMD	RMD を更新
 	Use Changes	変更を適用

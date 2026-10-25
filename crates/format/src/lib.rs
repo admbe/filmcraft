@@ -242,7 +242,7 @@ fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
     // refused: the project's fall back to what a project from before them reads as, a clip's own
     // give way to the project's.
     if let Err(e) = loaded.project.settings.camera_raw.validate() {
-        log::warn!("Project Settings ▸ Camera RAW: {e}; using the defaults");
+        log::warn!("Project Settings > Camera RAW: {e}; using the defaults");
         loaded.project.settings.camera_raw = filmcraft_media::RawDevelop::default();
     }
     let max = filmcraft_media::MAX_AUDIO_STREAMS;

@@ -3642,7 +3642,7 @@
 	Blend Bias	Sesgo de mezcla
 	Blend Type	Tipo de mezcla
 	Camera RAW	RAW de cámara
-	Camera RAW clips develop with these settings unless they have settings of their own (Clip ▸ Source Settings ▸ Decode Using ▸ Clip).	Los clips RAW de cámara se revelan con estos ajustes salvo que tengan ajustes propios (Clip ▸ Ajustes de origen ▸ Decodificar con ▸ Clip).
+	Camera RAW clips develop with these settings unless they have settings of their own (Clip > Source Settings > Decode Using > Clip).	Los clips RAW de cámara se revelan con estos ajustes salvo que tengan ajustes propios (Clip > Ajustes de origen > Decodificar con > Clip).
 	Camera RAW…	RAW de cámara…
 	Camera Raw	RAW de cámara
 	Chroma Noise Reduction	Reducción de ruido de croma
@@ -3687,7 +3687,7 @@
 	The linear output carries no look: choose a display or log gamma curve to apply it.	La salida lineal no lleva ningún aspecto: elija una curva gamma de pantalla o logarítmica para aplicarlo.
 	The luma and RGB curves the clip records.	Las curvas de luma y RGB que graba el clip.
 	This clip carries no creative LUT.	Este clip no lleva ninguna LUT creativa.
-	This clip decodes with the project's Camera RAW settings (File ▸ Project Settings ▸ Camera RAW). Choose Decode Using ▸ Clip to give it settings of its own.	Este clip se decodifica con los ajustes de RAW de cámara del proyecto (Archivo ▸ Ajustes del proyecto ▸ RAW de cámara). Elija Decodificar con ▸ Clip para darle ajustes propios.
+	This clip decodes with the project's Camera RAW settings (File > Project Settings > Camera RAW). Choose Decode Using > Clip to give it settings of its own.	Este clip se decodifica con los ajustes de RAW de cámara del proyecto (Archivo > Ajustes del proyecto > RAW de cámara). Elija Decodificar con > Clip para darle ajustes propios.
 	This clip has no HDRx track (Nikon R3D NE records none): there is nothing to blend.	Este clip no tiene pista HDRx (Nikon R3D NE no la graba): no hay nada que mezclar.
 	Update RMD	Actualizar RMD
 	Use Changes	Usar cambios

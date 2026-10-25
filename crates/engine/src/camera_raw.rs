@@ -549,7 +549,7 @@ fn report(s: &Session, id: ItemId, ids: &[ItemId]) -> Result<Value> {
         "colorSpace": s.project.color_space_override(m).map(|c| c.id()),
         "settings": controls(&d, Some(m.interpret.develop), info.as_ref(), as_shot, follows),
         "message": if follows {
-            "This clip decodes with the project's Camera RAW settings (File ▸ Project Settings ▸ Camera RAW). Choose Decode Using ▸ Clip to give it settings of its own."
+            "This clip decodes with the project's Camera RAW settings (File > Project Settings > Camera RAW). Choose Decode Using > Clip to give it settings of its own."
         } else {
             "RED IPP2 development of the RAW picture. ISO, colour temperature, tint and exposure are applied by the SDK before development (as shot unless set); the output tone map and highlight roll-off shape a display gamma curve. Proxies keep the look they were made with."
         },
@@ -608,7 +608,7 @@ pub(crate) fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
         "standard": d == RawDevelop::STANDARD,
         "clips": follow,
         "settings": controls(&d, None, None, None, false),
-        "message": "Camera RAW clips develop with these settings unless they have settings of their own (Clip ▸ Source Settings ▸ Decode Using ▸ Clip).",
+        "message": "Camera RAW clips develop with these settings unless they have settings of their own (Clip > Source Settings > Decode Using > Clip).",
     }))
 }
 
@@ -637,9 +637,9 @@ pub fn panel_texts() -> Vec<String> {
         }
     }
     for m in [
-        "This clip decodes with the project's Camera RAW settings (File ▸ Project Settings ▸ Camera RAW). Choose Decode Using ▸ Clip to give it settings of its own.",
+        "This clip decodes with the project's Camera RAW settings (File > Project Settings > Camera RAW). Choose Decode Using > Clip to give it settings of its own.",
         "RED IPP2 development of the RAW picture. ISO, colour temperature, tint and exposure are applied by the SDK before development (as shot unless set); the output tone map and highlight roll-off shape a display gamma curve. Proxies keep the look they were made with.",
-        "Camera RAW clips develop with these settings unless they have settings of their own (Clip ▸ Source Settings ▸ Decode Using ▸ Clip).",
+        "Camera RAW clips develop with these settings unless they have settings of their own (Clip > Source Settings > Decode Using > Clip).",
         "No RMD sidecar: the clip's recorded settings are the camera's.",
     ] {
         add(m);
