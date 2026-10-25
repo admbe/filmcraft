@@ -453,9 +453,10 @@ pub fn run_font_scans(scans: &[(&str, fn())]) -> usize {
     failed
 }
 
-/// Whether [`warm_system_fonts`] has finished.
+/// Whether [`warm_system_fonts`] has finished. Always in unit tests, where the font lookups do
+/// not wait for the scan but look the faces up at once (`cjk`, `rtl`).
 pub fn system_fonts_done() -> bool {
-    SYSTEM_FONTS_DONE.load(std::sync::atomic::Ordering::Acquire)
+    cfg!(test) || SYSTEM_FONTS_DONE.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Install the Latin UI fonts, Chinese fallback (craft-fonts or an installed face), Japanese
