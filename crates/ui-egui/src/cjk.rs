@@ -35,6 +35,9 @@ fn system_font() -> Option<Arc<FontData>> {
     CHINESE.get_or_init(|| find_system_font(SAMPLE, PREFERRED)).clone()
 }
 
+/// The font-data name of the installed Hangul face [`install`] appends to every family.
+pub(crate) const KOREAN_FACE: &str = "system-korean";
+
 fn korean_font() -> Option<Arc<FontData>> {
     KOREAN.get_or_init(|| find_system_font(KOREAN_SAMPLE, KOREAN_PREFERRED)).clone()
 }
@@ -88,9 +91,9 @@ pub(crate) fn available() -> bool {
 pub(crate) fn install(fonts: &mut FontDefinitions) {
     install_chinese(fonts);
     if let Some(font) = korean_font_now() {
-        fonts.font_data.insert("system-korean".into(), font);
+        fonts.font_data.insert(KOREAN_FACE.into(), font);
         for stack in fonts.families.values_mut() {
-            stack.push("system-korean".into());
+            stack.push(KOREAN_FACE.into());
         }
     }
 }
