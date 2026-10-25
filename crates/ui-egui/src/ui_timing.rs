@@ -36,6 +36,8 @@ pub struct UiTiming {
     /// All the time [`UiTiming::exclude`] has left out, so a panel that opened the modal leaves
     /// it out too ([`UiTiming::panel_done`]).
     excluded: Duration,
+    /// A logic half has ended and no panel half has followed it yet.
+    logic_pending: bool,
 }
 
 /// When a panel started drawing, for [`UiTiming::panel_done`].
@@ -88,7 +90,15 @@ impl UiTiming {
         let Some(t0) = self.started.take() else { return };
         let took = t0.elapsed();
         match half {
-            Half::Logic => self.logic = self.logic.saturating_add(took),
+            Half::Logic => {
+                // eframe also runs logic alone while the window is hidden: a logic half that no
+                // panel half followed is a frame of its own, not part of the next one
+                if self.logic_pending {
+                    self.close_frame();
+                }
+                self.logic = self.logic.saturating_add(took);
+                self.logic_pending = true;
+            }
             Half::Panels => {
                 self.panels = self.panels.saturating_add(took);
                 self.close_frame();
@@ -97,6 +107,7 @@ impl UiTiming {
     }
 
     fn close_frame(&mut self) {
+        self.logic_pending = false;
         let (logic, panels) = (std::mem::take(&mut self.logic), std::mem::take(&mut self.panels));
         let ms = logic.saturating_add(panels).as_secs_f64() * 1e3;
         let mut by_panel = std::mem::take(&mut self.panel_times);
@@ -195,6 +206,19 @@ mod tests {
         assert_eq!(s["over250"], 1);
         assert_eq!(s["longestMs"], 300.0);
         assert_eq!(t.slow_logged, 1);
+    }
+
+    #[test]
+    fn logic_run_alone_while_hidden_is_a_frame_of_its_own() {
+        // logic-only ticks while hidden added up into the next drawn frame's time
+        let mut t = UiTiming::default();
+        for _ in 0..3 {
+            t.begin();
+            t.end(Half::Logic);
+        }
+        t.begin();
+        t.end(Half::Panels);
+        assert_eq!(t.stats()["frames"], 3, "two logic-only ticks, then logic and panels");
     }
 
     #[test]
