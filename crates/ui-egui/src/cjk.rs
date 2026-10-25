@@ -43,7 +43,8 @@ fn korean_font() -> Option<Arc<FontData>> {
 }
 
 /// Look for the installed Chinese and Korean faces now (on a thread of its own at start-up:
-/// scanning the system fonts took ~1.7 s of the first frame on Windows).
+/// scanning the system fonts took ~1.7 s of the first frame on Windows). Native builds only.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn warm_up() {
     let _ = system_font();
     let _ = korean_font();

@@ -64,7 +64,8 @@ pub(crate) fn craft_fonts() -> impl Iterator<Item = &'static CraftFont> {
 static FONTS: OnceLock<Vec<(String, Arc<FontData>)>> = OnceLock::new();
 
 /// Look for the installed right-to-left faces now (on a thread of its own at start-up, see
-/// [`crate::theme::warm_system_fonts`]).
+/// [`crate::theme::warm_system_fonts`]). Native builds only.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn warm_up() {
     let _ = system_fonts();
 }
