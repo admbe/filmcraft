@@ -234,6 +234,9 @@ pub struct History {
     /// Key of the last [`Session::edit_merged`] step: a continuous gesture (a fader drag) with the
     /// same key folds into that one undo step.
     pub merge_key: Option<String>,
+    /// The redo steps the first edit of that merged step cleared, given back when the step is
+    /// reverted ([`Session::revert_merged`]): cancelling a preview after an Undo keeps the Redo.
+    pub merge_redo: Vec<(String, Arc<Project>)>,
 }
 
 impl History {
@@ -896,6 +899,7 @@ impl Session {
         }
         self.history.redo.clear();
         self.history.merge_key = None;
+        self.history.merge_redo.clear();
         self.state = st;
         self.drop_stale_gap();
         self.bump();
@@ -907,8 +911,10 @@ impl Session {
     pub fn edit_merged<R>(&mut self, label: &str, key: &str, f: impl FnOnce(&mut Project, &mut EditorState) -> Result<R>) -> Result<R> {
         let merge = self.history.merge_key.as_deref() == Some(key) && self.history.undo.last().is_some_and(|u| u.0 == label);
         if !merge {
+            let redo = self.history.redo.clone();
             let r = self.edit(label, f)?;
             self.history.merge_key = Some(key.to_string());
+            self.history.merge_redo = redo;
             return Ok(r);
         }
         let mut p = (*self.project).clone();
@@ -1007,6 +1013,7 @@ impl Session {
         };
         self.project = prev;
         self.history.merge_key = None;
+        self.history.redo = std::mem::take(&mut self.history.merge_redo);
         self.fix_state();
         self.bump();
         true

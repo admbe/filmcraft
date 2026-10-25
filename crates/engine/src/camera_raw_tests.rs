@@ -498,12 +498,18 @@ fn previews_coalesce_into_one_undo_step_and_revert() {
     assert_eq!((r["preview"].clone(), develop(&s).unwrap().kelvin, steps(&s)), (json!(false), Some(4300), opened.1 + 1), "{r}");
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!((develop(&s), steps(&s)), opened, "one Undo takes the whole dialog back");
+    let undone = s.history.redo.len();
     let before = (develop(&s), steps(&s));
     s.execute("clip.sourceSettings", json!({"items": [id.0], "decodeUsing": "project", "preview": true})).unwrap();
     assert_eq!(develop(&s), None);
     let r = s.execute("clip.sourceSettings", json!({"items": [id.0], "revert": true})).unwrap();
     assert_eq!(r["reverted"], true);
     assert_eq!((develop(&s), steps(&s)), before, "Cancel leaves no trace");
+    // nor takes away the Redo of what was undone before the preview
+    assert_eq!(s.history.redo.len(), undone, "the redo steps are back");
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(develop(&s).unwrap().kelvin, Some(4300), "Redo brings the committed dialog back");
+    s.execute("edit.undo", json!({})).unwrap();
     for bad in [json!({"revert": true, "iso": 800}), json!({"revert": true, "updateRmd": true}), json!({"commit": 1})] {
         assert!(s.execute("clip.sourceSettings", bad.clone()).is_err(), "{bad}");
     }
