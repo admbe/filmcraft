@@ -606,7 +606,13 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
     if r.is_ok() && matches!(id, "playhead.start" | "playhead.end") {
         crate::panels::timeline::reveal_playhead(app, ctx);
     }
-    if r.is_ok() && matches!(id, "edit.copy" | "edit.cut") {
+    let filled_clipboard = match id {
+        "edit.copy" | "edit.cut" => r.is_ok(),
+        // over a range with no clips on the targeted tracks they leave the clipboard (and the OS one) as it was
+        "sequence.lift" | "sequence.extract" => r.as_ref().is_ok_and(|v| v["copied"].as_u64().is_some_and(|n| n > 0)),
+        _ => false,
+    };
+    if filled_clipboard {
         remember_stale_clipboard_media(app);
         put_clip_names_on_system_clipboard(app, ctx);
     }

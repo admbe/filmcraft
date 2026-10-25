@@ -79,24 +79,50 @@ pub struct TlState {
     thumb_pps: Option<f64>,
     /// Show Duplicate Frame Markers: the markers of a sequence, with the session revision, the
     /// sequence and the project they were worked out for.
-    duplicates: Option<(DuplicatesKey, Arc<HashMap<ClipId, DuplicateFrames>>)>,
+    duplicates: Option<(DuplicatesKey, DuplicateMarkers)>,
+    /// The markers being worked out on a background thread, and where the thread leaves them.
+    duplicates_pending: Option<DuplicatesKey>,
+    duplicates_done: Arc<Mutex<Option<(DuplicatesKey, DuplicateMarkers)>>>,
 }
 
 /// (session revision, sequence, project address)
 type DuplicatesKey = (u64, ItemId, usize);
+type DuplicateMarkers = Arc<HashMap<ClipId, DuplicateFrames>>;
 
-/// The duplicate frame markers of sequence `seq_id`, worked out again only after the project
-/// changes.
-fn duplicate_markers(app: &mut FilmcraftApp, seq_id: ItemId, seq: &Sequence) -> Arc<HashMap<ClipId, DuplicateFrames>> {
+/// The duplicate frame markers of sequence `seq_id`, worked out again on a background thread
+/// after the project changes: a long sequence takes too long for a frame. Until the new markers
+/// are ready, the last ones of the same sequence are shown.
+fn duplicate_markers(app: &mut FilmcraftApp, ctx: &egui::Context, seq_id: ItemId, seq: &Sequence) -> DuplicateMarkers {
     let key = (app.session.revision, seq_id, Arc::as_ptr(&app.session.project) as usize);
-    if let Some((k, d)) = &app.tl.duplicates
-        && *k == key
+    let done = app.tl.duplicates_done.lock().unwrap_or_else(|e| e.into_inner()).take();
+    // a job that finishes after a newer one leaves the newer markers in place
+    if let Some((k, d)) = done
+        && app.tl.duplicates.as_ref().is_none_or(|(have, _)| *have != key)
     {
-        return d.clone();
+        app.tl.duplicates = Some((k, d));
     }
-    let d: Arc<HashMap<ClipId, DuplicateFrames>> = Arc::new(duplicate_frames(&app.session.project, seq).into_iter().map(|d| (d.clip, d)).collect());
-    app.tl.duplicates = Some((key, d.clone()));
-    d
+    match &app.tl.duplicates {
+        Some((k, d)) if *k == key => return d.clone(),
+        _ => {}
+    }
+    if app.tl.duplicates_pending != Some(key) {
+        app.tl.duplicates_pending = Some(key);
+        let (project, seq, slot, ctx) = (app.session.project.clone(), seq.clone(), app.tl.duplicates_done.clone(), ctx.clone());
+        let run = move || {
+            // a panic in the comparison must not take the app down: it leaves no markers
+            let d = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| duplicate_frames(&project, &seq))).unwrap_or_default();
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, Arc::new(d.into_iter().map(|d| (d.clip, d)).collect())));
+            ctx.request_repaint();
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        std::thread::spawn(run);
+        #[cfg(target_arch = "wasm32")]
+        run();
+    }
+    match &app.tl.duplicates {
+        Some(((_, s, _), d)) if *s == seq_id => d.clone(),
+        _ => Arc::default(),
+    }
 }
 
 impl TlState {
@@ -109,6 +135,9 @@ impl TlState {
         self.seq_peak_keys = Default::default();
         self.seq_keys_seen.clear();
         self.peak_max.clear();
+        self.duplicates = None;
+        self.duplicates_pending = None;
+        self.duplicates_done = Default::default();
     }
 }
 
@@ -537,7 +566,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if copying {
         ctx.set_cursor_icon(CursorIcon::Copy);
     }
-    let duplicates = if app.session.state.show_duplicate_frame_markers { duplicate_markers(app, seq_id, seq) } else { Arc::default() };
+    let duplicates = if app.session.state.show_duplicate_frame_markers { duplicate_markers(app, &ctx, seq_id, seq) } else { Arc::default() };
     for r in &rows {
         let Some(tr) = seq.track(r.track) else { continue };
         let clip_rect = if r.kind == TrackKind::Video { vclip } else { aclip };

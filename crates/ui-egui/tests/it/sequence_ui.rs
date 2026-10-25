@@ -133,6 +133,20 @@ impl Driver {
         self.frames(3);
     }
 
+    /// The ids under `prefix` once `done` holds for them: the timeline works out duplicate frame
+    /// markers on a background thread.
+    fn ids_once(&mut self, prefix: &str, mut done: impl FnMut(&[String]) -> bool) -> Vec<String> {
+        let t0 = std::time::Instant::now();
+        loop {
+            let ids = self.ids(prefix);
+            if done(&ids) || t0.elapsed().as_secs() >= 30 {
+                return ids;
+            }
+            self.frames(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     fn ids(&mut self, prefix: &str) -> Vec<String> {
         let v = self.ok("ui.elements", json!({"prefix": prefix}));
         v.as_array().unwrap().iter().filter_map(|e| e["id"].as_str().map(str::to_string)).collect()
@@ -330,23 +344,21 @@ fn duplicate_frame_markers_are_drawn_on_repeated_clips() {
     assert!(d.ids("timeline.duplicateFrames.").is_empty(), "hidden until Show Duplicate Frame Markers");
     d.click("timeline.toggle.settings");
     d.click("timeline.settings.showDuplicateFrameMarkers");
-    d.frames(3);
     assert!(d.app().session.state.show_duplicate_frame_markers);
-    let marks = d.ids("timeline.duplicateFrames.");
+    let has = |marks: &[String], clip: u64| marks.contains(&format!("timeline.duplicateFrames.{clip}.0"));
+    let marks = d.ids_once("timeline.duplicateFrames.", |m| has(m, first) && has(m, copy));
     for clip in [first, copy] {
-        assert!(marks.contains(&format!("timeline.duplicateFrames.{clip}.0")), "clip {clip}: {marks:?}");
+        assert!(has(&marks, clip), "clip {clip}: {marks:?}");
     }
     // the markers follow edits: without the copy the first clip repeats nothing (the demo
     // repeats frames of another clip elsewhere, and those markers stay)
     let ours = |marks: &[String]| marks.iter().filter(|m| [first, copy].iter().any(|c| m.starts_with(&format!("timeline.duplicateFrames.{c}.")))).count();
     d.exec("edit.undo", json!({}));
-    d.frames(3);
-    let marks = d.ids("timeline.duplicateFrames.");
+    let marks = d.ids_once("timeline.duplicateFrames.", |m| ours(m) == 0);
     assert_eq!(ours(&marks), 0, "the copy is gone: {marks:?}");
     assert!(!marks.is_empty(), "the demo's own repeat: {marks:?}");
     d.exec("edit.redo", json!({}));
-    d.frames(3);
-    assert_eq!(ours(&d.ids("timeline.duplicateFrames.")), 2, "the copy is back");
+    assert_eq!(ours(&d.ids_once("timeline.duplicateFrames.", |m| ours(m) == 2)), 2, "the copy is back");
     // at 200 % the copy shows every other frame of the original, so the original repeats in
     // single frames
     d.app()
@@ -363,9 +375,9 @@ fn duplicate_frame_markers_are_drawn_on_repeated_clips() {
     let (scroll, pps) = (d.app().ui.timeline.scroll, d.app().ui.timeline.pps);
     let middle = (start + duration / 2) as f64 / filmcraft_time::TICKS_PER_SECOND as f64;
     (d.app().ui.timeline.scroll, d.app().ui.timeline.target_scroll) = (middle, middle);
-    d.frames(3);
-    let marks = d.ids(&format!("timeline.duplicateFrames.{first}."));
-    assert!(!marks.is_empty() && !marks.contains(&format!("timeline.duplicateFrames.{first}.0")), "{marks:?}");
+    let scrolled = |m: &[String]| !m.is_empty() && !m.contains(&format!("timeline.duplicateFrames.{first}.0"));
+    let marks = d.ids_once(&format!("timeline.duplicateFrames.{first}."), scrolled);
+    assert!(scrolled(&marks), "{marks:?}");
     (d.app().ui.timeline.scroll, d.app().ui.timeline.target_scroll) = (scroll, scroll);
     // zoomed far out, the single frames make one stripe
     (d.app().ui.timeline.pps, d.app().ui.timeline.target_pps) = (1.0, 1.0);
