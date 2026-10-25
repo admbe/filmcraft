@@ -323,6 +323,7 @@
 	Show Active Caption Tracks Only	アクティブなキャプショントラックのみ表示
 	Show All Caption Tracks	すべてのキャプショントラックを表示
 	Show All Marker Colors	すべての色のマーカーを表示
+	Show Duplicate Frame Markers	重複フレームマーカーを表示
 	Show Guides	ガイドを表示
 	Show Rulers	ルーラーを表示
 	Show Through Edits	スルー編集点を表示
@@ -348,6 +349,7 @@
 	Transcribe Sequence…	シーケンスを文字起こし…
 	Transcribe…	文字起こし…
 	Transcript	文字起こし
+	Transparency Grid	透明グリッド
 	Transparent Video…	透明ビデオ…
 	Trim Edit	トリム編集
 	Trim…	トリム…

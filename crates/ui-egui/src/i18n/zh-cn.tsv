@@ -317,6 +317,7 @@
 	Show Active Caption Tracks Only	仅显示活动字幕轨道
 	Show All Caption Tracks	显示所有字幕轨道
 	Show All Marker Colors	显示所有标记颜色
+	Show Duplicate Frame Markers	显示重复帧标记
 	Show Guides	显示参考线
 	Show Rulers	显示标尺
 	Show Through Edits	显示贯通编辑
@@ -342,6 +343,7 @@
 	Transcribe Sequence…	转录序列…
 	Transcribe…	转录…
 	Transcript	转录文稿
+	Transparency Grid	透明网格
 	Transparent Video…	透明视频…
 	Trim Edit	修剪编辑
 	Trim…	修剪…
