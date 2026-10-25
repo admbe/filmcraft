@@ -64,6 +64,7 @@ pub mod state;
 pub mod theme;
 mod theme_favorites;
 pub mod ui_timing;
+pub mod updates_ui;
 pub mod widgets;
 
 use std::collections::HashMap;
@@ -303,6 +304,7 @@ pub struct FilmcraftApp {
     pub scrub: scrub::ScrubAudio,
     pub hooks: HostHooks,
     pub dialog: Option<Dialog>,
+    pub(crate) updates_rt: updates_ui::Runtime,
     pub file_dialogs: panels::file_dialogs::FileDialogState,
     /// The native file dialog the host is showing ([`Self::pick`]).
     native_dialog: Option<native_dialogs::PendingDialog>,
@@ -639,6 +641,7 @@ impl FilmcraftApp {
             hooks: HostHooks::default(),
             // Unsaved changes left by a session that died are offered first thing.
             dialog: recovery.then_some(Dialog::Recovery),
+            updates_rt: Default::default(),
             file_dialogs: Default::default(),
             native_dialog: None,
             auto: Default::default(),
@@ -2139,6 +2142,7 @@ impl FilmcraftApp {
         // the Timeline has had its chance to place a file drop this frame; anything left stays a bin import
         self.pending_timeline_drop = None;
         panels::dialogs::show(self, &ctx);
+        updates_ui::show(self, &ctx);
         if !self.ui.show_status_bar {
             return;
         }
@@ -2456,6 +2460,7 @@ impl FilmcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
         self.sync_pool();
+        updates_ui::tick(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_media_refresh(ctx, now);
     }
