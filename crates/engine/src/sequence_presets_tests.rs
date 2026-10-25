@@ -114,8 +114,11 @@ fn custom_presets_save_list_make_sequences_rename_and_delete() {
 fn a_new_project_starts_with_a_sequence_from_a_preset() {
     let mut s = Session::default();
     s.sequence_presets.save(anamorphic(), false).unwrap();
-    s.execute("file.newProject", json!({"name": "Anamorphic", "sequencePreset": "ZR anamorphic 8044 25p"})).unwrap();
+    let r = s.execute("file.newProject", json!({"name": "Anamorphic", "sequencePreset": "ZR anamorphic 8044 25p"})).unwrap();
     assert_eq!(s.project.name, "Anamorphic");
+    // the answer names the project, as without a preset, and the sequence it starts with
+    assert_eq!((r["name"].clone(), r["revision"].as_u64()), (json!("Anamorphic"), Some(s.revision)), "{r}");
+    assert_eq!(r["sequence"].as_u64(), s.state.active_sequence.map(|q| q.0), "{r}");
     let q = s.active_sequence().unwrap();
     assert_eq!((q.settings.width, q.video_tracks.len()), (8044, 4));
     assert_eq!(s.project.sequences().count(), 1);
